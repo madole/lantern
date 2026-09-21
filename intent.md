@@ -84,13 +84,13 @@ Ordered roughly by expected payoff versus effort.
 - Collect the `Server` response header and try the title on common alternate
   ports (8080, 8443, 8000, ...), not just 80/443.
 
-### 7. SNMP
+### 7. SNMP — DONE
 
 - Attempt `sysName` / `sysDescr` with community `public`.
 - Excellent detail (model, firmware, OS) for managed switches, printers, and
   NAS boxes; silent when SNMP is disabled.
 
-### 8. Service banners
+### 8. Service banners — DONE
 
 - Grab banners for SSH, SMB, and similar ports to infer vendor/model/OS when no
   name source succeeds.

@@ -36,9 +36,11 @@ Name resolution is a chain of network probes, each with its own timeout:
 - a PTR query to the router (`router DNS`),
 - mDNS and LLMNR multicast queries,
 - NetBIOS,
+- SNMP `sysName`/`sysDescr`,
 - SSDP/UPnP,
 - a TLS handshake,
-- an HTTP fetch for the page `<title>`.
+- an HTTP fetch for the page `<title>`,
+- short-lived service banners (SSH, SMB, ...).
 
 Run sequentially, a device that never answers costs the **sum** of every
 timeout — roughly 20 seconds. Multiply that by every host on a `/24` and a scan
@@ -153,6 +155,7 @@ The resolver pool is a **lazy module-level singleton** in
 _executor = None
 _executor_lock = threading.Lock()
 
+
 def _get_executor():
     global _executor
     with _executor_lock:
@@ -226,22 +229,23 @@ thread and coordinates the **resolver workers**.
 ### Priority
 
 `NAME_SOURCES` is an ordered tuple. Index is priority: `passive` is 0 (best),
-`web title` is 9 (worst). The winner is always the *highest-priority* source
-that returned a non-empty name, regardless of which finished first. If `mDNS`
-and `web title` both answer, `mDNS` wins because it is earlier in the tuple.
+`service banner` is 11 (worst). The winner is always the *highest-priority*
+source that returned a non-empty name, regardless of which finished first. If
+`mDNS` and `web title` both answer, `mDNS` wins because it is earlier in the
+tuple.
 
 ### Tiers
 
 Sources are split into two tiers:
 
 - **Fast tier** — everything except `NAME.DEFERRED_SOURCES`.
-- **Deferred tier** — `TLS certificate` and `web title`, the slowest and
-  lowest-yield probes.
+- **Deferred tier** — `TLS certificate`, `web title`, and `service banner`, the
+  slowest and lowest-yield probes.
 
 The deferred tier is submitted **only if the fast tier produced no name**. A
 device named by passive/mDNS/SSDP/hostname therefore never opens a TLS
-connection or fetches a web page, which removes the bulk of wasted work and
-end-of-scan noise.
+connection, fetches a web page, or probes service banners, which removes the
+bulk of wasted work and end-of-scan noise.
 
 ```mermaid
 flowchart TD
@@ -263,7 +267,9 @@ flowchart TD
 
 ```python
 done, pending = concurrent.futures.wait(
-    pending, timeout=remaining, return_when=concurrent.futures.FIRST_COMPLETED,
+    pending,
+    timeout=remaining,
+    return_when=concurrent.futures.FIRST_COMPLETED,
 )
 ```
 
@@ -365,6 +371,7 @@ scapy-based sources, on the theory that concurrent sniffers might interfere:
 ```python
 _probe_semaphore = threading.Semaphore(NAME.PROBE_LIMIT)  # removed
 
+
 def _run_source(source, resolver, ip_address):
     if source in NAME.PACKET_PROBES:
         with _probe_semaphore:
@@ -461,9 +468,9 @@ All tuning lives in `constants.py`:
 | `NAME.DEADLINE` | `10.0` | Total seconds per device across both tiers. |
 | `NAME.MAX_DEVICE_WORKERS` | `4` | Devices resolved in parallel. |
 | `NAME.MAX_WORKERS` | `64` | Shared resolver-pool size. |
-| `NAME.DEFERRED_SOURCES` | `{"TLS certificate", "web title"}` | Slow sources tried only if the fast tier is empty. |
+| `NAME.DEFERRED_SOURCES` | `{"TLS certificate", "web title", "service banner"}` | Slow sources tried only if the fast tier is empty. |
 
-Sizing intuition: with `MAX_DEVICE_WORKERS = 4` and ten sources, at most ~40
+Sizing intuition: with `MAX_DEVICE_WORKERS = 4` and twelve sources, at most ~48
 tasks are live at once, so `MAX_WORKERS = 64` means a device's whole chain can
 start without queuing behind another device. If you add sources or raise the
 device worker count, revisit `MAX_WORKERS`.

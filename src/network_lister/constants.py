@@ -29,6 +29,18 @@ class NETBIOS:
     WILDCARD_NAME = b"CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 
+class SNMP:
+    PORT = 161
+    TIMEOUT = 2
+    COMMUNITY = "public"
+    # Scalar OIDs for the two name-ish values: sysName is the configured name,
+    # sysDescr is the free-form description (model/OS/firmware).
+    SYS_NAME = "1.3.6.1.2.1.1.5.0"
+    SYS_DESCR = "1.3.6.1.2.1.1.1.0"
+    NAME_OIDS = (SYS_NAME, SYS_DESCR)
+    MAX_NAME_LENGTH = 60
+
+
 class MDNS:
     ADDR = "224.0.0.251"
     MAC = "01:00:5e:00:00:fb"
@@ -104,7 +116,7 @@ class NAME:
     # chain runs without queuing behind another device's lookups.
     MAX_WORKERS = 64
     # Slow, low-yield sources only tried when every faster source came up empty.
-    DEFERRED_SOURCES = frozenset({"TLS certificate", "web title"})
+    DEFERRED_SOURCES = frozenset({"TLS certificate", "web title", "service banner"})
 
 
 class SSDP:
@@ -166,6 +178,25 @@ class WEB:
         "apache2",
         "iis windows server",
     )
+
+
+class BANNER:
+    # Tight per-port budget: banners are a last resort, so a dead port must not
+    # stall the chain. Every port is probed concurrently, so this is also the
+    # whole banner lookup's wall-clock bound.
+    TIMEOUT = 0.75
+    MAX_BYTES = 512
+    # Protocols that announce a banner immediately on connect.
+    TEXT_PORTS = (22, 21, 25, 23, 110, 143)
+    SMB_PORT = 445
+    # SMB2 dialects offered in the negotiate request: 2.0.2 through 3.0.2.
+    # 3.1.1 is omitted because it requires negotiate contexts we do not send.
+    SMB_DIALECTS = (0x0202, 0x0210, 0x0300, 0x0302)
+    NTLM_SIGNATURE = b"NTLMSSP\x00"
+    NTLM_CHALLENGE = 2
+    # NTLM target-info AV pair ids that carry the server's computer name.
+    AV_NB_COMPUTER_NAME = 1
+    AV_DNS_COMPUTER_NAME = 3
 
 
 class TLS:

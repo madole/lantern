@@ -5,6 +5,7 @@ import time
 from network_lister.constants import FALLBACK, NAME
 from network_lister.logger import logger
 from network_lister.passive import get_passive_name, resolve_passive_names
+from network_lister.resolvers.banner import get_service_banner
 from network_lister.resolvers.hostname import get_hostname
 from network_lister.resolvers.llmnr import get_llmnr_name
 from network_lister.resolvers.mdns import (
@@ -14,6 +15,7 @@ from network_lister.resolvers.mdns import (
 )
 from network_lister.resolvers.netbios import get_net_bios_name
 from network_lister.resolvers.router_dns import get_router_dns_name
+from network_lister.resolvers.snmp import get_snmp_name
 from network_lister.resolvers.ssdp import (
     discover_ssdp,
     get_ssdp_name,
@@ -34,8 +36,10 @@ NAME_SOURCES = (
     ("mDNS services", get_mdns_service_name),
     ("NetBIOS", get_net_bios_name),
     ("LLMNR", get_llmnr_name),
+    ("SNMP", get_snmp_name),
     ("TLS certificate", get_tls_name),
     ("web title", get_web_title),
+    ("service banner", get_service_banner),
 )
 
 # Sources whose answers are learned by broadcast/multicast: a single pass

@@ -3,10 +3,23 @@ import time
 
 import pytest
 from scapy.all import DNS, DNSRR, IP, UDP
+from scapy.layers.snmp import SNMP as SNMP_PACKET
+from scapy.layers.snmp import SNMPresponse, SNMPvarbind
 
 import network_lister.resolvers.name as name
-from network_lister.constants import FALLBACK
-from network_lister.resolvers import llmnr, mdns, router_dns, ssdp, tls, vendor, web
+from network_lister.constants import BANNER, FALLBACK
+from network_lister.constants import SNMP as SNMP_CONST
+from network_lister.resolvers import (
+    banner,
+    llmnr,
+    mdns,
+    router_dns,
+    snmp,
+    ssdp,
+    tls,
+    vendor,
+    web,
+)
 from network_lister.resolvers.name import NAME_SOURCES
 
 
@@ -126,10 +139,10 @@ def test_get_tls_name_tries_ports_until_match(monkeypatch):
     assert ports == list(tls.TLS.PORTS)
 
 
-def test_tls_runs_before_web_title():
+def test_tls_runs_after_snmp_before_web_title():
     sources = [source for source, _ in NAME_SOURCES]
 
-    assert sources.index("TLS certificate") == sources.index("LLMNR") + 1
+    assert sources.index("TLS certificate") == sources.index("SNMP") + 1
     assert sources.index("TLS certificate") < sources.index("web title")
 
 
@@ -556,3 +569,141 @@ def test_get_ssdp_name_searches_targeted_without_discovery(monkeypatch):
         assert ssdp.get_ssdp_name("192.168.1.5") == "TV"
     finally:
         ssdp.reset_ssdp_cache()
+
+
+def _snmp_reply(ip, varbinds, error=0):
+    return (
+        IP(src=ip)
+        / UDP()
+        / SNMP_PACKET(
+            community="public",
+            PDU=SNMPresponse(error=error, varbindlist=varbinds),
+        )
+    )
+
+
+def test_get_snmp_name_prefers_sys_name(monkeypatch):
+    reply = _snmp_reply(
+        "192.168.1.10",
+        [
+            SNMPvarbind(oid=SNMP_CONST.SYS_DESCR, value="Cisco IOS"),
+            SNMPvarbind(oid=SNMP_CONST.SYS_NAME, value="core-switch"),
+        ],
+    )
+    monkeypatch.setattr(snmp, "sr1", lambda *a, **k: reply)
+
+    assert snmp.get_snmp_name("192.168.1.10") == "core-switch"
+
+
+def test_get_snmp_name_falls_back_to_sys_descr(monkeypatch):
+    reply = _snmp_reply(
+        "192.168.1.10",
+        [SNMPvarbind(oid=SNMP_CONST.SYS_DESCR, value="Linux NAS 6.1")],
+    )
+    monkeypatch.setattr(snmp, "sr1", lambda *a, **k: reply)
+
+    assert snmp.get_snmp_name("192.168.1.10") == "Linux NAS 6.1"
+
+
+def test_get_snmp_name_without_response(monkeypatch):
+    monkeypatch.setattr(snmp, "sr1", lambda *a, **k: None)
+
+    assert snmp.get_snmp_name("192.168.1.10") is None
+
+
+def test_get_snmp_name_ignores_error_status(monkeypatch):
+    reply = _snmp_reply(
+        "192.168.1.10",
+        [SNMPvarbind(oid=SNMP_CONST.SYS_NAME, value="switch")],
+        error=2,
+    )
+    monkeypatch.setattr(snmp, "sr1", lambda *a, **k: reply)
+
+    assert snmp.get_snmp_name("192.168.1.10") is None
+
+
+def test_get_snmp_name_truncates_long_description(monkeypatch):
+    long_descr = "A" * (SNMP_CONST.MAX_NAME_LENGTH + 20)
+    reply = _snmp_reply(
+        "192.168.1.10",
+        [SNMPvarbind(oid=SNMP_CONST.SYS_DESCR, value=long_descr)],
+    )
+    monkeypatch.setattr(snmp, "sr1", lambda *a, **k: reply)
+
+    assert snmp.get_snmp_name("192.168.1.10") == "A" * SNMP_CONST.MAX_NAME_LENGTH
+
+
+def test_snmp_runs_after_llmnr_before_tls():
+    sources = [source for source, _ in NAME_SOURCES]
+
+    assert sources.index("SNMP") == sources.index("LLMNR") + 1
+    assert sources.index("TLS certificate") == sources.index("SNMP") + 1
+
+
+def test_clean_banner_strips_control_sequences():
+    assert banner._clean_banner(b"\xff\xfb\x01SSH-2.0-OpenSSH_9.6\r\n") == (
+        "SSH-2.0-OpenSSH_9.6"
+    )
+    assert banner._clean_banner(b"") is None
+
+
+def _ntlm_challenge_blob(computer_name):
+    encoded = computer_name.encode("utf-16-le")
+    av_pairs = (
+        BANNER.AV_NB_COMPUTER_NAME.to_bytes(2, "little")
+        + len(encoded).to_bytes(2, "little")
+        + encoded
+        + b"\x00\x00\x00\x00"
+    )
+    header = (
+        BANNER.NTLM_SIGNATURE
+        + BANNER.NTLM_CHALLENGE.to_bytes(4, "little")
+        + b"\x00" * 8
+        + b"\x00" * 4
+        + b"\x00" * 8
+        + b"\x00" * 8
+        + len(av_pairs).to_bytes(2, "little")
+        + len(av_pairs).to_bytes(2, "little")
+        + (48).to_bytes(4, "little")
+    )
+    return header + av_pairs
+
+
+def test_parse_smb_name_extracts_computer_name():
+    body = b"\xfeSMB" + b"\x00" * 60 + _ntlm_challenge_blob("OFFICE-PC")
+
+    assert banner.parse_smb_name(body) == "OFFICE-PC"
+
+
+def test_parse_smb_name_rejects_non_smb():
+    assert banner.parse_smb_name(b"HTTP/1.1 200 OK") is None
+    assert banner.parse_smb_name(b"") is None
+
+
+def test_get_service_banner_uses_text_banner(monkeypatch):
+    monkeypatch.setattr(
+        banner,
+        "_text_banner",
+        lambda ip, port, timeout: "SSH-2.0-OpenSSH_9.6" if port == 22 else None,
+    )
+    monkeypatch.setattr(banner, "_smb_banner", lambda *a, **k: None)
+
+    assert banner.get_service_banner("192.168.1.10") == "SSH-2.0-OpenSSH_9.6"
+
+
+def test_get_service_banner_falls_back_to_smb(monkeypatch):
+    monkeypatch.setattr(banner, "_text_banner", lambda *a, **k: None)
+    monkeypatch.setattr(banner, "_smb_banner", lambda *a, **k: "OFFICE-PC")
+
+    assert banner.get_service_banner("192.168.1.10") == "OFFICE-PC"
+
+
+def test_get_service_banner_returns_none(monkeypatch):
+    monkeypatch.setattr(banner, "_text_banner", lambda *a, **k: None)
+    monkeypatch.setattr(banner, "_smb_banner", lambda *a, **k: None)
+
+    assert banner.get_service_banner("192.168.1.10") is None
+
+
+def test_service_banner_is_last_source():
+    assert NAME_SOURCES[-1][0] == "service banner"
