@@ -3,6 +3,7 @@ from scapy.all import DNS, DNSQR, IP, UDP, AsyncSniffer, Ether, sendp
 from lantern.constants import ENCODING, MDNS
 from lantern.logger import logger
 from lantern.resolvers.dns_common import dns_answers, ptr_name, reverse_arpa
+from lantern.sanitize import sanitize_name
 
 
 def _mdns_query(qnames, timeout):
@@ -86,7 +87,7 @@ def _mdns_instance_name(answer):
         if service and instance.lower().endswith(suffix.lower()):
             instance = instance[: -len(suffix)]
 
-    return instance.rstrip(".") or None
+    return sanitize_name(instance.rstrip("."))
 
 
 _mdns_service_cache = None

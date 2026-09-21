@@ -2,6 +2,7 @@ from scapy.all import IP, UDP, NBNSQueryRequest, NBNSQueryResponse, sr1
 
 from lantern.constants import ENCODING, NETBIOS
 from lantern.logger import logger
+from lantern.sanitize import sanitize_name
 
 
 def get_net_bios_name(ip_address):
@@ -17,7 +18,7 @@ def get_net_bios_name(ip_address):
 
     if reply and reply.haslayer(NBNSQueryResponse):
         try:
-            return reply.ADDR_ENTRY[0].RR_NAME.strip().decode(ENCODING)
+            return sanitize_name(reply.ADDR_ENTRY[0].RR_NAME.strip().decode(ENCODING))
         except Exception as error:
             logger.debug("Malformed NetBIOS response from {}: {}", ip_address, error)
     return None

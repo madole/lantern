@@ -2,8 +2,9 @@ from scapy.all import IP, UDP, sr1
 from scapy.layers.snmp import SNMP as SNMP_PACKET
 from scapy.layers.snmp import SNMPget, SNMPvarbind
 
-from lantern.constants import ENCODING, SNMP
+from lantern.constants import SNMP
 from lantern.logger import logger
+from lantern.sanitize import sanitize_name
 from lantern.scope import require_read_only
 
 
@@ -26,13 +27,7 @@ def _varbind_text(varbind):
     raw = getattr(value, "val", None)
     if raw is None and isinstance(value, str):
         raw = value
-    if isinstance(raw, bytes):
-        text = raw.decode(ENCODING, errors="ignore").strip()
-    elif isinstance(raw, str):
-        text = raw.strip()
-    else:
-        return None
-    return text or None
+    return sanitize_name(raw)
 
 
 def _varbind_oid(varbind):

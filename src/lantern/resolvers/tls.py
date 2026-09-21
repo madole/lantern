@@ -5,6 +5,7 @@ import tempfile
 
 from lantern.constants import TLS
 from lantern.logger import logger
+from lantern.sanitize import sanitize_name
 
 
 def _decode_certificate(der_certificate):
@@ -45,10 +46,7 @@ def certificate_names(certificate):
 
 def clean_cert_name(name, ip_address):
     """Reject certificate values that are not usable device names."""
-    if not name:
-        return None
-
-    name = name.strip()
+    name = sanitize_name(name)
     if not name or name == ip_address or name.startswith("*"):
         return None
 

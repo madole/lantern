@@ -12,6 +12,7 @@ import lantern.resolvers.ssdp as ssdp
 from lantern import scope
 from lantern.constants import FALLBACK
 from lantern.constants import SNMP as SNMP_CONST
+from lantern.resolvers import web
 
 
 @pytest.fixture(autouse=True)
@@ -145,3 +146,79 @@ def test_require_read_only_rejects_mutating_operations():
 
     with pytest.raises(scope.ReadOnlyViolation):
         scope.require_read_only("snmp set")
+
+
+@pytest.fixture
+def tracked_ssdp_fetch(monkeypatch):
+    opened = []
+
+    def fake_open(request, timeout=None):
+        opened.append(request.full_url)
+        return None
+
+    monkeypatch.setattr(ssdp._opener, "open", fake_open)
+    return opened
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "file:///etc/shadow",
+        "ftp://192.168.1.5/desc.xml",
+        "http://user:pass@192.168.1.5/desc.xml",
+        "http://localhost/desc.xml",
+        "http://attacker.example/desc.xml",
+    ],
+)
+def test_get_ssdp_description_rejects_unsafe_locations(tracked_ssdp_fetch, location):
+    scope.set_scan_network("192.168.1.0/24")
+
+    assert ssdp.get_ssdp_description(location) is None
+    assert tracked_ssdp_fetch == []
+
+
+def test_get_ssdp_description_rejects_out_of_scope_host(tracked_ssdp_fetch):
+    scope.set_scan_network("192.168.1.0/24")
+
+    assert ssdp.get_ssdp_description("http://10.0.0.9/desc.xml") is None
+    assert tracked_ssdp_fetch == []
+
+
+def test_get_ssdp_description_fetches_in_scope_http_host(monkeypatch):
+    fetched = []
+
+    class FakeResponse:
+        def read(self, amount=-1):
+            return b"<root><friendlyName>Living Room TV</friendlyName></root>"
+
+        def close(self):
+            pass
+
+    def fake_open(request, timeout=None):
+        fetched.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(ssdp._opener, "open", fake_open)
+    scope.set_scan_network("192.168.1.0/24")
+
+    assert ssdp.get_ssdp_description("http://192.168.1.5/desc.xml") == (
+        "Living Room TV"
+    )
+    assert fetched == ["http://192.168.1.5/desc.xml"]
+
+
+def test_get_web_title_ignores_off_subnet_redirect(monkeypatch):
+    class FakeResponse:
+        def read(self, amount=-1):
+            return b"<html><title>cloud metadata</title></html>"
+
+        def geturl(self):
+            return "http://169.254.169.254/latest/meta-data/"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(web.urllib.request, "urlopen", lambda *a, **k: FakeResponse())
+    scope.set_scan_network("192.168.1.0/24")
+
+    assert web.get_web_title("192.168.1.5") is None

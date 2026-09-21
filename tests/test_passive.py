@@ -39,6 +39,12 @@ def test_parse_dhcp_without_hostname():
     assert passive.parse_dhcp(pkt) is None
 
 
+def test_parse_dhcp_sanitizes_hostname():
+    pkt = _dhcp("192.168.1.5", b"lap\x1b[31mtop")
+
+    assert passive.parse_dhcp(pkt) == ("192.168.1.5", ["lap [31mtop"])
+
+
 def test_parse_llmnr_response():
     pkt = (
         IP(src="192.168.1.9")

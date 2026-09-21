@@ -11,6 +11,7 @@ from yaspin import yaspin
 
 from lantern.constants import ENCODING, MDNS, PASSIVE, SSDP
 from lantern.logger import logger
+from lantern.sanitize import sanitize_name
 from lantern.scope import is_in_scope
 
 _names = {}
@@ -38,12 +39,10 @@ def reset_passive_cache():
 
 
 def _decode(value):
-    if isinstance(value, bytes):
-        value = value.decode(ENCODING, errors="ignore")
-    if not isinstance(value, str):
+    value = sanitize_name(value)
+    if value is None:
         return None
-    value = value.strip().rstrip(".")
-    return value or None
+    return value.rstrip(".") or None
 
 
 def _dns_answers(dns):

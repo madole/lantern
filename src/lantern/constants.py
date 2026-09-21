@@ -133,6 +133,9 @@ class SSDP:
     MAN = "ssdp:discover"
     MX = 1
     LOCATION_HEADER = "location:"
+    # A description URL is attacker-controlled: only fetch plain HTTP(S) so a
+    # responder cannot point us at file:// or another local scheme.
+    ALLOWED_SCHEMES = ("http", "https")
     # Preferred order for picking a human-meaningful name from a description.
     NAME_FIELDS = ("friendlyname", "modelname", "manufacturer")
 

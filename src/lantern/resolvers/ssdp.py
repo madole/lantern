@@ -1,11 +1,15 @@
+import ipaddress
 import urllib.error
+import urllib.parse
 import urllib.request
-import xml.etree.ElementTree
 
+import defusedxml.ElementTree
+from defusedxml import DefusedXmlException
 from scapy.all import IP, UDP, AsyncSniffer, Ether, Raw, sendp
 
 from lantern.constants import ENCODING, SSDP, WEB
 from lantern.logger import logger
+from lantern.sanitize import sanitize_name
 from lantern.scope import is_in_scope, require_read_only
 
 # Scan-scoped caches. ``_locations`` maps a responder IP to its description
@@ -14,6 +18,54 @@ from lantern.scope import is_in_scope, require_read_only
 _locations = {}
 _names = {}
 _discovery_done = False
+
+
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects so a LAN device cannot bounce the fetch off-subnet."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        logger.debug("Refusing SSDP description redirect to {}", newurl)
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirects)
+
+
+def _allowed_location(location):
+    """Return ``location`` when it is a safe, in-scope description URL.
+
+    The URL comes from an untrusted SSDP response, so it must be plain HTTP(S),
+    carry no embedded credentials, and name an in-scope IP literal. This blocks
+    ``file://`` (and other local schemes), loopback/link-local targets such as
+    the cloud metadata service, and hostnames that could rebound off-subnet.
+    """
+    if not location:
+        return None
+
+    try:
+        parsed = urllib.parse.urlparse(location)
+    except ValueError:
+        logger.debug("Ignoring unparseable SSDP location {!r}", location)
+        return None
+
+    if parsed.scheme.lower() not in SSDP.ALLOWED_SCHEMES:
+        logger.debug("Ignoring SSDP location with scheme {!r}", parsed.scheme)
+        return None
+    if parsed.username or parsed.password:
+        logger.debug("Ignoring SSDP location with embedded credentials")
+        return None
+
+    host = parsed.hostname
+    try:
+        ipaddress.ip_address(host)
+    except (TypeError, ValueError):
+        logger.debug("Ignoring SSDP location with non-IP host {!r}", host)
+        return None
+    if not is_in_scope(host):
+        logger.debug("Ignoring out-of-scope SSDP location {}", location)
+        return None
+
+    return location
 
 
 def reset_ssdp_cache():
@@ -42,8 +94,10 @@ def parse_ssdp_location(payload):
 def parse_ssdp_description(body):
     """Extract a device name from a UPnP device description XML document."""
     try:
-        root = xml.etree.ElementTree.fromstring(body)
-    except xml.etree.ElementTree.ParseError as error:
+        # defusedxml rejects DTDs/entities, so a hostile description cannot
+        # trigger entity-expansion ("billion laughs") memory exhaustion.
+        root = defusedxml.ElementTree.fromstring(body)
+    except (defusedxml.ElementTree.ParseError, DefusedXmlException) as error:
         logger.trace("Malformed SSDP description: {}", error)
         return None
 
@@ -51,7 +105,7 @@ def parse_ssdp_description(body):
     for element in root.iter():
         tag = element.tag.rsplit("}", 1)[-1].lower()
         if tag in SSDP.NAME_FIELDS and element.text and tag not in fields:
-            text = element.text.strip()
+            text = sanitize_name(element.text)
             if text:
                 fields[tag] = text
 
@@ -65,13 +119,17 @@ def parse_ssdp_description(body):
 
 def get_ssdp_description(location, timeout=SSDP.HTTP_TIMEOUT):
     """Download a UPnP device description and pull a friendly name from it."""
+    location = _allowed_location(location)
+    if location is None:
+        return None
+
     logger.debug("Fetching SSDP description from {}", location)
     request = urllib.request.Request(
         location,
         headers={WEB.USER_AGENT_HEADER: WEB.USER_AGENT},
     )
     try:
-        response = urllib.request.urlopen(request, timeout=timeout)
+        response = _opener.open(request, timeout=timeout)
     except Exception as error:
         logger.trace("SSDP description request to {} failed: {}", location, error)
         return None

@@ -21,6 +21,7 @@ from lantern.resolvers import (
     web,
 )
 from lantern.resolvers.name import NAME_SOURCES
+from lantern.sanitize import sanitize_name
 
 
 class FakeResponse:
@@ -186,6 +187,35 @@ def test_parse_ssdp_description_falls_back_to_model():
 
 def test_parse_ssdp_description_rejects_malformed_xml():
     assert ssdp.parse_ssdp_description(b"not xml") is None
+
+
+def test_parse_ssdp_description_rejects_entity_expansion():
+    body = (
+        b'<?xml version="1.0"?>'
+        b'<!DOCTYPE root [<!ENTITY a "boom">]>'
+        b"<root><friendlyName>&a;</friendlyName></root>"
+    )
+
+    assert ssdp.parse_ssdp_description(body) is None
+
+
+def test_parse_ssdp_description_strips_invisible_characters():
+    # U+202E bidi override and U+200B zero-width space are valid XML text but
+    # can spoof how the name renders (or hide characters) in a terminal.
+    body = (
+        b"<root><friendlyName>Living\xe2\x80\xae Room\xe2\x80\x8b</friendlyName></root>"
+    )
+
+    assert ssdp.parse_ssdp_description(body) == "Living Room"
+
+
+def test_sanitize_name_strips_controls_and_keeps_unicode():
+    assert sanitize_name("Liv\x1b[31ming") == "Liv [31ming"
+    assert sanitize_name("A\x00B\nC") == "A B C"
+    assert sanitize_name("\x1b\x07\u200b") is None
+    assert sanitize_name("Caf\u00e9 TV") == "Caf\u00e9 TV"
+    assert sanitize_name(b"laptop") == "laptop"
+    assert sanitize_name(None) is None
 
 
 def test_ssdp_runs_after_dns_sources():

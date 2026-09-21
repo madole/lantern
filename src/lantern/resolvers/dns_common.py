@@ -1,6 +1,7 @@
 from scapy.all import DNS
 
 from lantern.constants import ENCODING
+from lantern.sanitize import sanitize_name
 
 
 def dns_answers(pkt):
@@ -19,5 +20,5 @@ def ptr_name(pkt):
     for answer in dns_answers(pkt):
         rdata = getattr(answer, "rdata", None)
         if isinstance(rdata, bytes):
-            return rdata.decode(ENCODING).rstrip(".")
+            return sanitize_name(rdata.decode(ENCODING).rstrip("."))
     return None
