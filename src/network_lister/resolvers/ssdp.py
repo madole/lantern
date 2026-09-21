@@ -7,6 +7,21 @@ from scapy.all import IP, UDP, AsyncSniffer, Ether, Raw, sendp
 from network_lister.constants import ENCODING, SSDP, WEB
 from network_lister.logger import logger
 
+# Scan-scoped caches. ``_locations`` maps a responder IP to its description
+# URL and ``_names`` to the name parsed from it. ``_discovery_done`` records
+# whether a single broadcast M-SEARCH already covered the whole subnet.
+_locations = {}
+_names = {}
+_discovery_done = False
+
+
+def reset_ssdp_cache():
+    """Drop scan-scoped SSDP results before a new scan."""
+    global _discovery_done
+    _locations.clear()
+    _names.clear()
+    _discovery_done = False
+
 
 def parse_ssdp_location(payload):
     """Pull the LOCATION header URL out of an SSDP M-SEARCH response."""
@@ -71,9 +86,8 @@ def get_ssdp_description(location, timeout=SSDP.HTTP_TIMEOUT):
     return parse_ssdp_description(body)
 
 
-def get_ssdp_name(ip_address, timeout=SSDP.TIMEOUT):
-    """Discover a device's UPnP name by broadcasting an SSDP search on the LAN."""
-    logger.debug("Querying SSDP/UPnP for IP: {}", ip_address)
+def _ssdp_search(timeout):
+    """Broadcast one M-SEARCH and return every ``(ip, location)`` seen."""
     request = (
         f"{SSDP.SEARCH_METHOD} {SSDP.SEARCH_TARGET} HTTP/1.1\r\n"
         f"HOST: {SSDP.ADDR}:{SSDP.PORT}\r\n"
@@ -93,19 +107,18 @@ def get_ssdp_name(ip_address, timeout=SSDP.TIMEOUT):
         / Raw(load=request)
     )
 
-    locations = []
+    found = []
 
     def handle(pkt):
         if (
             pkt.haslayer(IP)
             and pkt.haslayer(UDP)
             and pkt.haslayer(Raw)
-            and pkt[IP].src == ip_address
             and pkt[UDP].sport == SSDP.PORT
         ):
             location = parse_ssdp_location(pkt[Raw].load)
             if location:
-                locations.append(location)
+                found.append((pkt[IP].src, location))
 
     sniffer = AsyncSniffer(
         filter=f"udp port {SSDP.PORT}",
@@ -116,13 +129,57 @@ def get_ssdp_name(ip_address, timeout=SSDP.TIMEOUT):
     )
     sniffer.start()
     sniffer.join()
+    return found
 
-    for location in locations:
+
+def discover_ssdp(timeout=SSDP.TIMEOUT):
+    """Cover the whole subnet with one M-SEARCH and cache IPs to locations."""
+    global _discovery_done
+    logger.debug("Discovering SSDP/UPnP devices on the LAN")
+    for ip_address, location in _ssdp_search(timeout):
+        _locations.setdefault(ip_address, location)
+    _discovery_done = True
+    logger.debug("SSDP discovery found {} device(s)", len(_locations))
+    return dict(_locations)
+
+
+def resolve_ssdp_names():
+    """Fetch every discovered description once and cache the parsed names."""
+    for ip_address, location in list(_locations.items()):
+        if ip_address in _names:
+            continue
+        name = get_ssdp_description(location)
+        if name:
+            _names[ip_address] = name
+    return dict(_names)
+
+
+def get_ssdp_name(ip_address, timeout=SSDP.TIMEOUT):
+    """Return a device's UPnP name, reusing the scan-scoped discovery cache."""
+    if ip_address in _names:
+        return _names[ip_address]
+
+    location = _locations.get(ip_address)
+    if location:
         name = get_ssdp_description(location)
         if name:
             logger.debug("SSDP resolved {} as {!r}", ip_address, name)
+            _names[ip_address] = name
+        return name
+
+    if _discovery_done:
+        return None
+
+    # No scan-scoped discovery ran: fall back to a targeted per-host search.
+    logger.debug("Querying SSDP/UPnP for IP: {}", ip_address)
+    for found_ip, found_location in _ssdp_search(timeout):
+        if found_ip != ip_address:
+            continue
+        name = get_ssdp_description(found_location)
+        if name:
+            logger.debug("SSDP resolved {} as {!r}", ip_address, name)
+            _names[ip_address] = name
             return name
 
-    if not locations:
-        logger.debug("No SSDP response for {}", ip_address)
+    logger.debug("No SSDP response for {}", ip_address)
     return None

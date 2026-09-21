@@ -1,11 +1,12 @@
 import ipaddress
 import socket
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from scapy.all import ARP, Ether, srp
 from tabulate import tabulate
 
-from network_lister.constants import NETWORK, TABLE
+from network_lister.constants import NAME, NETWORK, TABLE
 from network_lister.logger import logger
 from network_lister.passive import (
     finish_passive_scan,
@@ -14,9 +15,24 @@ from network_lister.passive import (
 )
 from network_lister.resolvers import (
     get_vendor,
+    prefetch_scan_names,
     reset_mdns_service_cache,
+    reset_name_state,
+    reset_ssdp_cache,
     resolve_name,
+    shutdown_name_state,
 )
+
+
+def _resolve_device(entry):
+    """Resolve one host's name and vendor, tagged with its logging context."""
+    ip, mac = entry
+    device = f"{ip} ({mac})"
+    with logger.contextualize(device=device):
+        name = resolve_name(ip, device=device)
+        vendor = get_vendor(mac)
+        logger.info("Identified {!r} (vendor: {})", name, vendor)
+    return {"ip": ip, "mac": mac, "name": name, "vendor": vendor}
 
 
 def scan_network(ip_range: str):
@@ -25,6 +41,8 @@ def scan_network(ip_range: str):
     started = time.monotonic()
 
     reset_mdns_service_cache()
+    reset_ssdp_cache()
+    reset_name_state()
 
     # Listen for self-announcements in parallel with the active ARP probe.
     sniffer = start_passive_scan()
@@ -48,14 +66,16 @@ def scan_network(ip_range: str):
         if ipaddress.ip_address(ip) in network:
             found.setdefault(ip, mac)
 
-    devices = []
-    for index, (ip, mac) in enumerate(found.items(), start=1):
-        with logger.contextualize(device=f"{ip} ({mac})"):
-            logger.debug("Resolving host {}/{}", index, len(found))
-            name = resolve_name(ip)
-            vendor = get_vendor(mac)
-            logger.info("Identified {!r} (vendor: {})", name, vendor)
-        devices.append({"ip": ip, "mac": mac, "name": name, "vendor": vendor})
+    # Broadcast lookups answer for every host at once, so do them once before
+    # resolving devices rather than repeating them per device.
+    prefetch_scan_names()
+
+    with ThreadPoolExecutor(max_workers=NAME.MAX_DEVICE_WORKERS) as pool:
+        devices = list(pool.map(_resolve_device, found.items()))
+
+    # Let any lookups still in flight finish before reporting, so nothing
+    # continues after the table is printed.
+    shutdown_name_state()
 
     elapsed = time.monotonic() - started
     if devices:

@@ -1,6 +1,11 @@
+import threading
+import time
+
 import pytest
 from scapy.all import DNS, DNSRR, IP, UDP
 
+import network_lister.resolvers.name as name
+from network_lister.constants import FALLBACK
 from network_lister.resolvers import llmnr, mdns, router_dns, ssdp, tls, vendor, web
 from network_lister.resolvers.name import NAME_SOURCES
 
@@ -391,3 +396,163 @@ def test_router_dns_runs_after_hostname():
 
     assert sources.index("router DNS") == sources.index("hostname") + 1
     assert sources.index("router DNS") < sources.index("mDNS")
+
+
+def test_resolve_name_returns_fallback(monkeypatch):
+    monkeypatch.setattr(name, "NAME_SOURCES", (("none", lambda ip: None),))
+
+    assert name.resolve_name("192.168.1.10") == FALLBACK.NAME
+
+
+def test_resolve_name_waits_for_higher_priority(monkeypatch):
+    def high(ip):
+        time.sleep(0.05)
+        return "high-name"
+
+    def low(ip):
+        return "low-name"
+
+    monkeypatch.setattr(name, "NAME_SOURCES", (("high", high), ("low", low)))
+
+    assert name.resolve_name("192.168.1.10") == "high-name"
+
+
+def test_resolve_name_does_not_wait_for_lower_priority(monkeypatch):
+    release = threading.Event()
+
+    def low(ip):
+        release.wait(5)
+        return "low-name"
+
+    monkeypatch.setattr(
+        name, "NAME_SOURCES", (("high", lambda ip: "high-name"), ("low", low))
+    )
+
+    started = time.monotonic()
+    try:
+        assert name.resolve_name("192.168.1.10") == "high-name"
+        assert time.monotonic() - started < 1.0
+    finally:
+        release.set()
+
+
+def test_resolve_name_stops_at_deadline(monkeypatch):
+    monkeypatch.setattr(name.NAME, "DEADLINE", 0.1)
+    monkeypatch.setattr(
+        name, "NAME_SOURCES", (("hang", lambda ip: (time.sleep(0.5), "late")[1]),)
+    )
+
+    started = time.monotonic()
+    assert name.resolve_name("192.168.1.10") == FALLBACK.NAME
+    assert time.monotonic() - started < 0.4
+
+
+def test_resolve_name_skips_deferred_sources_when_fast_source_wins(monkeypatch):
+    calls = []
+
+    def deferred(ip):
+        calls.append("web title")
+        return "web-name"
+
+    monkeypatch.setattr(
+        name,
+        "NAME_SOURCES",
+        (("fast", lambda ip: "fast-name"), ("web title", deferred)),
+    )
+
+    assert name.resolve_name("192.168.1.10") == "fast-name"
+    assert calls == []
+
+
+def test_resolve_name_runs_deferred_sources_when_fast_sources_fail(monkeypatch):
+    monkeypatch.setattr(
+        name,
+        "NAME_SOURCES",
+        (("none", lambda ip: None), ("web title", lambda ip: "web-name")),
+    )
+
+    assert name.resolve_name("192.168.1.10") == "web-name"
+
+
+def test_shutdown_name_state_resets_executor(monkeypatch):
+    monkeypatch.setattr(name, "NAME_SOURCES", (("only", lambda ip: "name"),))
+
+    name.resolve_name("192.168.1.10")
+    first = name._get_executor()
+
+    name.shutdown_name_state()
+
+    assert name._executor is None
+    assert name._get_executor() is not first
+    name.shutdown_name_state()
+
+
+def test_prefetch_scan_names_runs_scan_scoped_sources(monkeypatch):
+    events = []
+    monkeypatch.setattr(name, "browse_mdns_services", lambda: events.append("mdns"))
+    monkeypatch.setattr(name, "discover_ssdp", lambda: events.append("ssdp"))
+    monkeypatch.setattr(name, "resolve_ssdp_names", lambda: events.append("ssdp-names"))
+    monkeypatch.setattr(name, "resolve_passive_names", lambda: events.append("passive"))
+
+    name.prefetch_scan_names()
+
+    assert events == ["mdns", "ssdp", "ssdp-names", "passive"]
+
+
+def test_discover_ssdp_collects_locations(monkeypatch):
+    ssdp.reset_ssdp_cache()
+    monkeypatch.setattr(
+        ssdp,
+        "_ssdp_search",
+        lambda timeout: [
+            ("192.168.1.5", "http://192.168.1.5/d.xml"),
+            ("192.168.1.6", "http://192.168.1.6/d.xml"),
+        ],
+    )
+
+    try:
+        assert ssdp.discover_ssdp() == {
+            "192.168.1.5": "http://192.168.1.5/d.xml",
+            "192.168.1.6": "http://192.168.1.6/d.xml",
+        }
+    finally:
+        ssdp.reset_ssdp_cache()
+
+
+def test_resolve_ssdp_names_caches_across_devices(monkeypatch):
+    ssdp.reset_ssdp_cache()
+    monkeypatch.setattr(
+        ssdp,
+        "_ssdp_search",
+        lambda timeout: [("192.168.1.5", "http://192.168.1.5/d.xml")],
+    )
+    monkeypatch.setattr(
+        ssdp,
+        "get_ssdp_description",
+        lambda location: {"http://192.168.1.5/d.xml": "Living Room TV"}.get(location),
+    )
+
+    try:
+        ssdp.discover_ssdp()
+        ssdp.resolve_ssdp_names()
+
+        assert ssdp.get_ssdp_name("192.168.1.5") == "Living Room TV"
+        assert ssdp.get_ssdp_name("192.168.1.99") is None
+    finally:
+        ssdp.reset_ssdp_cache()
+
+
+def test_get_ssdp_name_searches_targeted_without_discovery(monkeypatch):
+    ssdp.reset_ssdp_cache()
+    monkeypatch.setattr(
+        ssdp,
+        "_ssdp_search",
+        lambda timeout: [("192.168.1.5", "http://192.168.1.5/d.xml")],
+    )
+    monkeypatch.setattr(ssdp, "get_ssdp_description", lambda location: "TV")
+
+    try:
+        assert ssdp.get_ssdp_name("192.168.1.5") == "TV"
+        assert ssdp.get_ssdp_name("192.168.1.5") == "TV"
+    finally:
+        ssdp.reset_ssdp_cache()

@@ -132,6 +132,23 @@ def test_get_passive_name_fetches_ssdp_once(monkeypatch):
     assert calls == ["http://192.168.1.5/d.xml"]
 
 
+def test_resolve_passive_names_prefetches_ssdp_descriptions(monkeypatch):
+    passive.reset_passive_cache()
+    payload = b"NOTIFY * HTTP/1.1\r\nLOCATION: http://192.168.1.5/d.xml\r\n\r\n"
+    passive._handle(IP(src="192.168.1.5") / UDP(sport=1900, dport=1900) / Raw(payload))
+
+    calls = []
+    monkeypatch.setattr(
+        resolvers,
+        "get_ssdp_description",
+        lambda location: calls.append(location) or "Living Room TV",
+    )
+
+    assert passive.resolve_passive_names() == {"192.168.1.5": "Living Room TV"}
+    assert passive.get_passive_name("192.168.1.5") == "Living Room TV"
+    assert calls == ["http://192.168.1.5/d.xml"]
+
+
 def test_passive_scan_spins_until_finished(monkeypatch):
     passive.reset_passive_cache()
     events = []

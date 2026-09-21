@@ -98,13 +98,12 @@ Ordered roughly by expected payoff versus effort.
 
 ## Future considerations
 
-Three follow-ups that the current implementation makes increasingly urgent.
+Follow-ups beyond the name-source work; A is done, B-D remain.
 
-### A. Concurrency and a per-device time budget
+### A. Concurrency and a per-device time budget — DONE
 
-Today `scan_network` resolves devices one at a time (`main.py:52`) and
-`resolve_name` walks `NAME_SOURCES` sequentially (`name.py:27`), each with its
-own timeout. Worst case per device is roughly the sum:
+`scan_network` used to resolve devices one at a time and `resolve_name` walked
+`NAME_SOURCES` sequentially, each with its own timeout. Worst case was the sum:
 
 | source | worst case |
 | --- | --- |
@@ -116,33 +115,43 @@ own timeout. Worst case per device is roughly the sum:
 | web title | 1s x 7 candidates |
 
 So ~20-25s per device, multiplied by device count, on top of the 30s passive
-window. On a busy /24 this dominates total runtime.
+window. On a busy /24 this dominated total runtime.
 
-Plan:
+What shipped:
 
-1. **Split scan-scoped from device-scoped sources.** Multicast/broadcast
-   lookups should run once for the whole scan and build an `IP -> name` map
-   before the device loop: mDNS service browse (already cached), SSDP discovery
-   (one M-SEARCH, collect every `LOCATION`), the passive harvest, and gateway
-   resolution. Device-scoped sources stay per-IP: reverse DNS, router-DNS PTR,
-   mDNS reverse, NetBIOS, LLMNR, TLS, web.
-2. **Run device-scoped sources concurrently per device** behind a
-   `ThreadPoolExecutor` and an overall per-device deadline
-   (new `NAME.DEADLINE` constant). Submit in `NAME_SOURCES` priority order,
-   collect results as they complete, return the highest-priority success, and
-   cancel the rest. Keep the existing order as the tie-breaker so behaviour is
-   unchanged when multiple sources answer.
-3. **Bound the sniffer fan-out.** `AsyncSniffer` is thread-based and each
-   instance opens its own BPF handle; concurrent mDNS/SSDP/NetBIOS/LLMNR
-   sniffers can cross-talk on shared ports. Gate the sniffer-based resolvers
-   with a semaphore (or serialize them) while letting the socket-based ones
-   (reverse DNS, router DNS, TLS, web) run freely.
-4. **Process devices with bounded parallelism** (e.g. 4-8 workers) so wall time
-   is ~`DEADLINE * ceil(N / workers)` plus the passive window.
-5. Move all timeouts/deadline into `constants.py` and allow env overrides.
+1. **Scan-scoped prefetch.** `prefetch_scan_names` (`name.py`) runs the
+   broadcast/multicast sources once per scan: `browse_mdns_services` (already
+   cached) and `discover_ssdp` + `resolve_ssdp_names`, which send one M-SEARCH
+   and collect every responder's `LOCATION` into an `IP -> name` cache. The
+   passive listener's SSDP descriptions are fetched once via
+   `resolve_passive_names`. `get_ssdp_name` reads the cache and only falls back
+   to a targeted per-host search when no scan-wide discovery ran.
+2. **Concurrent device sources with a deadline, in tiers.** `resolve_name` runs
+   all fast `NAME_SOURCES` together in a shared `ThreadPoolExecutor`, returning
+   the highest-priority success as soon as no still-running source outranks it
+   and cancelling the rest. Only when every fast source comes up empty does it
+   run the deferred tier (`NAME.DEFERRED_SOURCES`: TLS certificate and web
+   title), so a device named quickly never spends time on the slow sources.
+   `NAME.DEADLINE` caps the total wait across both tiers.
+3. **No global probe tunnel.** An earlier attempt serialized every scapy-based
+   source through a `PROBE_LIMIT` semaphore, but workers blocked on one token
+   starved the lookups (devices hit the deadline and fell through to `Unknown`)
+   and built a backlog that could not be cancelled, leaking past the report.
+   Sources now run independently; each sniffer/`sr1` uses its own socket and
+   filters replies by source IP, so they do not need to be serialized.
+4. **Bounded device parallelism.** `scan_network` resolves devices through a
+   `ThreadPoolExecutor(NAME.MAX_DEVICE_WORKERS)` pool, then `shutdown_name_state`
+   waits for in-flight lookups so nothing continues after the table is printed.
+5. `NAME.*` constants live in `constants.py` and the per-scan state is reset via
+   `reset_name_state` / `reset_ssdp_cache`. Device context is passed into pooled
+   lookups so their logs keep the `IP (MAC)` label.
 
-Risk: simultaneous multicast sniffers on UDP/5353 and UDP/1900 can mis-attribute
-answers. The scan-scoped maps in step 1 remove most of that need.
+Remaining: the `NAME.*` values are not yet env-overridable. Concurrent multicast
+sniffers on UDP/5353 and UDP/1900 can theoretically cross-talk, though every
+resolver filters by responder IP and the scan-scoped maps remove most of the
+need. Early exit still leaves already-running fast-tier lookups to finish (the
+drain absorbs them), but the slow TLS/web tier is never started for a device
+that the fast tier already named.
 
 ### B. Source and confidence reporting
 

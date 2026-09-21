@@ -95,6 +95,18 @@ class PASSIVE:
     DHCP_HOSTNAME_OPTIONS = ("hostname", 12)
 
 
+class NAME:
+    # Total wall-clock budget for one device's device-scoped name lookups.
+    DEADLINE = 10.0
+    # Devices resolved in parallel; each runs its sources concurrently.
+    MAX_DEVICE_WORKERS = 4
+    # Shared pool for per-device sources; large enough that a device's whole
+    # chain runs without queuing behind another device's lookups.
+    MAX_WORKERS = 64
+    # Slow, low-yield sources only tried when every faster source came up empty.
+    DEFERRED_SOURCES = frozenset({"TLS certificate", "web title"})
+
+
 class SSDP:
     ADDR = "239.255.255.250"
     MAC = "01:00:5e:7f:ff:fa"

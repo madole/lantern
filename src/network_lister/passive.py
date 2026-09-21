@@ -227,6 +227,17 @@ def get_passive_name(ip_address):
     return None
 
 
+def resolve_passive_names():
+    """Fetch every passively-observed SSDP description once, up front."""
+    for ip_address, location in list(_locations.items()):
+        if ip_address in _names:
+            continue
+        name = _fetch_ssdp_description(location)
+        if name:
+            _names[ip_address] = name
+    return dict(_names)
+
+
 def get_passive_macs():
     return dict(_macs)
 
