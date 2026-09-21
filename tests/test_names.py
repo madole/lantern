@@ -6,10 +6,10 @@ from scapy.all import DNS, DNSRR, IP, UDP
 from scapy.layers.snmp import SNMP as SNMP_PACKET
 from scapy.layers.snmp import SNMPresponse, SNMPvarbind
 
-import network_lister.resolvers.name as name
-from network_lister.constants import BANNER, FALLBACK
-from network_lister.constants import SNMP as SNMP_CONST
-from network_lister.resolvers import (
+import lantern.resolvers.name as name
+from lantern.constants import BANNER, FALLBACK
+from lantern.constants import SNMP as SNMP_CONST
+from lantern.resolvers import (
     banner,
     llmnr,
     mdns,
@@ -20,7 +20,7 @@ from network_lister.resolvers import (
     vendor,
     web,
 )
-from network_lister.resolvers.name import NAME_SOURCES
+from lantern.resolvers.name import NAME_SOURCES
 
 
 class FakeResponse:

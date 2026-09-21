@@ -1,7 +1,7 @@
 from mac_vendor_lookup import MacLookup
 
-from network_lister.constants import FALLBACK
-from network_lister.logger import logger
+from lantern.constants import FALLBACK
+from lantern.logger import logger
 
 mac_lookup = MacLookup()
 

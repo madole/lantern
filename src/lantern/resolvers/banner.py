@@ -8,8 +8,8 @@ from scapy.layers.smb2 import (
     SMB2_Negotiate_Protocol_Request,
 )
 
-from network_lister.constants import BANNER, ENCODING
-from network_lister.logger import logger
+from lantern.constants import BANNER, ENCODING
+from lantern.logger import logger
 
 # Strip telnet control sequences and other non-printable noise from a banner.
 _NON_PRINTABLE = re.compile(r"[^\x20-\x7e]+")

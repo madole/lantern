@@ -1,8 +1,8 @@
 from scapy.all import DNS, DNSQR, IP, UDP, conf, sr1
 
-from network_lister.constants import ROUTER_DNS
-from network_lister.logger import logger
-from network_lister.resolvers.dns_common import ptr_name, reverse_arpa
+from lantern.constants import ROUTER_DNS
+from lantern.logger import logger
+from lantern.resolvers.dns_common import ptr_name, reverse_arpa
 
 
 def get_gateway_ip():

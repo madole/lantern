@@ -1,6 +1,6 @@
 from scapy.all import DNS
 
-from network_lister.constants import ENCODING
+from lantern.constants import ENCODING
 
 
 def dns_answers(pkt):

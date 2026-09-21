@@ -284,6 +284,41 @@ wheels = [
 ]
 
 [[package]]
+name = "lantern"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "bs4" },
+    { name = "loguru" },
+    { name = "mac-vendor-lookup" },
+    { name = "scapy" },
+    { name = "tabulate" },
+    { name = "yaspin" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "bs4", specifier = ">=0.0.2" },
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "mac-vendor-lookup", specifier = ">=0.1.15" },
+    { name = "scapy", specifier = ">=2.7.0" },
+    { name = "tabulate", specifier = ">=0.10.0" },
+    { name = "yaspin", specifier = ">=3.0.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.3.0" },
+    { name = "ruff", specifier = ">=0.8.0" },
+]
+
+[[package]]
 name = "loguru"
 version = "0.7.3"
 source = { registry = "https://pypi.org/simple" }
@@ -444,41 +479,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/03/55/8b81e62363ae0721b2735bcaa111c1e08d30d4d0680b591bfd3b7305e9ab/multidict-6.9.0-cp315-cp315t-win_amd64.whl", hash = "sha256:150f1e5bcc14234e99aacc931deafa52713157df947efeecc1a3b7601f2714ab", size = 62222, upload-time = "2026-09-18T12:50:46.979Z" },
     { url = "https://files.pythonhosted.org/packages/fa/73/fb518ae4d302f71a1e96496bb011409d09736a91aadd3a6ceb66a7a2f259/multidict-6.9.0-cp315-cp315t-win_arm64.whl", hash = "sha256:734c985bbd60e84d0ea523bafe139394e46b8a3f35754a70111dbcbba243f7f4", size = 56365, upload-time = "2026-09-18T12:50:49.649Z" },
     { url = "https://files.pythonhosted.org/packages/75/2a/557689d56936a83c112ee28f4c4d7698ff01c24e22d217ad8fcce19982c7/multidict-6.9.0-py3-none-any.whl", hash = "sha256:57c2445049f7d8e66306f712868219da7ff7168ef42263dc032401211bf1205c", size = 19175, upload-time = "2026-09-18T12:50:52.172Z" },
-]
-
-[[package]]
-name = "network-lister"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "bs4" },
-    { name = "loguru" },
-    { name = "mac-vendor-lookup" },
-    { name = "scapy" },
-    { name = "tabulate" },
-    { name = "yaspin" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "bs4", specifier = ">=0.0.2" },
-    { name = "loguru", specifier = ">=0.7.3" },
-    { name = "mac-vendor-lookup", specifier = ">=0.1.15" },
-    { name = "scapy", specifier = ">=2.7.0" },
-    { name = "tabulate", specifier = ">=0.10.0" },
-    { name = "yaspin", specifier = ">=3.0.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.3.0" },
-    { name = "ruff", specifier = ">=0.8.0" },
 ]
 
 [[package]]

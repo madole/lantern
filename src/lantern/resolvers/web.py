@@ -3,8 +3,8 @@ import urllib.request
 
 from bs4 import BeautifulSoup
 
-from network_lister.constants import WEB
-from network_lister.logger import logger
+from lantern.constants import WEB
+from lantern.logger import logger
 
 
 def is_generic_title(title):

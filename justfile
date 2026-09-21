@@ -22,5 +22,5 @@ test *args:
 # Run lint and tests
 check: lint format-check test
 
-scan_lan:
-    sudo uv run python -m network_lister.main
+scan:
+    sudo uv run python -m lantern.main

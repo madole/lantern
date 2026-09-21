@@ -4,8 +4,8 @@ import xml.etree.ElementTree
 
 from scapy.all import IP, UDP, AsyncSniffer, Ether, Raw, sendp
 
-from network_lister.constants import ENCODING, SSDP, WEB
-from network_lister.logger import logger
+from lantern.constants import ENCODING, SSDP, WEB
+from lantern.logger import logger
 
 # Scan-scoped caches. ``_locations`` maps a responder IP to its description
 # URL and ``_names`` to the name parsed from it. ``_discovery_done`` records

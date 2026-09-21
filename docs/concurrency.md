@@ -1,6 +1,6 @@
-# Concurrency in network-lister
+# Concurrency in lantern
 
-This document explains how `network-lister` runs work in parallel, how the
+This document explains how `lantern` runs work in parallel, how the
 thread pools are wired together, and how the small amount of shared state is
 protected. It also covers the threading primitives used here — locks,
 semaphores, futures, and context variables — and the failure mode that led to

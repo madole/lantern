@@ -2,8 +2,8 @@ from scapy.all import IP, UDP, sr1
 from scapy.layers.snmp import SNMP as SNMP_PACKET
 from scapy.layers.snmp import SNMPget, SNMPvarbind
 
-from network_lister.constants import ENCODING, SNMP
-from network_lister.logger import logger
+from lantern.constants import ENCODING, SNMP
+from lantern.logger import logger
 
 
 def _build_query(ip_address, oids):

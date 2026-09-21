@@ -1,7 +1,7 @@
 from scapy.all import IP, UDP, NBNSQueryRequest, NBNSQueryResponse, sr1
 
-from network_lister.constants import ENCODING, NETBIOS
-from network_lister.logger import logger
+from lantern.constants import ENCODING, NETBIOS
+from lantern.logger import logger
 
 
 def get_net_bios_name(ip_address):

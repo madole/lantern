@@ -1,8 +1,8 @@
 from scapy.all import DNS, DNSQR, IP, UDP, AsyncSniffer, Ether, sendp
 
-from network_lister.constants import ENCODING, MDNS
-from network_lister.logger import logger
-from network_lister.resolvers.dns_common import dns_answers, ptr_name, reverse_arpa
+from lantern.constants import ENCODING, MDNS
+from lantern.logger import logger
+from lantern.resolvers.dns_common import dns_answers, ptr_name, reverse_arpa
 
 
 def _mdns_query(qnames, timeout):

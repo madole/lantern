@@ -1,7 +1,7 @@
 from scapy.all import ARP, BOOTP, DHCP, DNS, DNSRR, IP, UDP, Raw
 
-import network_lister.passive as passive
-import network_lister.resolvers as resolvers
+import lantern.passive as passive
+import lantern.resolvers as resolvers
 
 
 def _dhcp(ip, hostname):

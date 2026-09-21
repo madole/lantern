@@ -3,7 +3,7 @@ import sys
 
 from loguru import logger
 
-from network_lister.constants import LOGGING
+from lantern.constants import LOGGING
 
 logger.remove()
 logger.level(LOGGING.LEVEL_DEBUG, color=LOGGING.COLOR_DEBUG)

@@ -6,14 +6,14 @@ from concurrent.futures import ThreadPoolExecutor
 from scapy.all import ARP, Ether, srp
 from tabulate import tabulate
 
-from network_lister.constants import NAME, NETWORK, TABLE
-from network_lister.logger import logger
-from network_lister.passive import (
+from lantern.constants import NAME, NETWORK, TABLE
+from lantern.logger import logger
+from lantern.passive import (
     finish_passive_scan,
     get_passive_macs,
     start_passive_scan,
 )
-from network_lister.resolvers import (
+from lantern.resolvers import (
     get_vendor,
     prefetch_scan_names,
     reset_mdns_service_cache,

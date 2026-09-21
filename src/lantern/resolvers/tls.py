@@ -3,8 +3,8 @@ import socket
 import ssl
 import tempfile
 
-from network_lister.constants import TLS
-from network_lister.logger import logger
+from lantern.constants import TLS
+from lantern.logger import logger
 
 
 def _decode_certificate(der_certificate):

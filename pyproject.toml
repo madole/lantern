@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "network-lister"
+name = "lantern"
 version = "0.1.0"
-description = "List devices on the local network"
+description = "Identify and name every device on your local network"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -24,7 +24,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/network_lister"]
+packages = ["src/lantern"]
 
 [tool.ruff]
 line-length = 88

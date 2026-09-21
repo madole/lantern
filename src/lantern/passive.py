@@ -9,8 +9,8 @@ ARP scan and feeds the normal name-resolution chain.
 from scapy.all import ARP, BOOTP, DHCP, DNS, IP, UDP, AsyncSniffer, Raw
 from yaspin import yaspin
 
-from network_lister.constants import ENCODING, MDNS, PASSIVE, SSDP
-from network_lister.logger import logger
+from lantern.constants import ENCODING, MDNS, PASSIVE, SSDP
+from lantern.logger import logger
 
 _names = {}
 _macs = {}
@@ -207,7 +207,7 @@ def _handle(pkt):
 
 def _fetch_ssdp_description(location):
     # Imported lazily so this module stays importable from resolvers.
-    from network_lister.resolvers import get_ssdp_description
+    from lantern.resolvers import get_ssdp_description
 
     return get_ssdp_description(location)
 

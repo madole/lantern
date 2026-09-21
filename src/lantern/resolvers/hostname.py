@@ -1,6 +1,6 @@
 import socket
 
-from network_lister.logger import logger
+from lantern.logger import logger
 
 
 def get_hostname(ip_address):
