@@ -65,6 +65,9 @@ or directly:
 sudo uv run python -m lantern.main
 ```
 
+`just scan` runs the same scan but opts into the one-time OUI vendor-list
+download (see [Configuration](#configuration)); the direct command leaves it off.
+
 `lantern` auto-detects your local address and scans the `/24` around it. The
 results table is written to stdout; logs go to stderr.
 
@@ -82,6 +85,16 @@ results table is written to stdout; logs go to stderr.
 ## Configuration
 
 - `LOG_LEVEL` — sets log verbosity (default `DEBUG`).
+- `LANTERN_SNMP_COMMUNITY` — read-only SNMP community string (default
+  `public`). Set it empty to skip SNMP probing entirely.
+- `LANTERN_TLS_VERIFY` — set to `1` to require a trusted TLS chain when reading
+  certificate names. Off by default because device certificates are usually
+  self-signed.
+- `LANTERN_OUI_DOWNLOAD` — set to `1` to allow fetching the IEEE OUI vendor
+  list. Off by default: only a pre-provisioned list at `~/.cache/mac-vendors.txt`
+  is used, so a scan makes no unsolicited internet requests. The `just scan`
+  recipe sets this for you; `LANTERN_SNMP_COMMUNITY` and `LANTERN_TLS_VERIFY`
+  pass through it as well.
 - All timeouts, ports, and concurrency limits live in
   [`src/lantern/constants.py`](src/lantern/constants.py).
 - There are no CLI arguments yet; the scan range is derived from the local IP.
@@ -105,6 +118,11 @@ Layout: `src/lantern/` (package, `resolvers/` per protocol), `tests/`,
   `scope.require_read_only` and the wire format is asserted in the tests.
 - **LAN-scoped**: every active probe is checked against the scanned subnet
   (`scope.is_in_scope`); an out-of-subnet address is skipped rather than sent.
+- **No unsolicited egress**: the tool does not reach the internet on its own.
+  The OUI vendor list is only downloaded when `LANTERN_OUI_DOWNLOAD=1`, and SNMP
+  can be disabled by clearing `LANTERN_SNMP_COMMUNITY`.
+- **Untrusted names**: any value learned from a device is stripped of control
+  and zero-width characters before it is logged or printed.
 - Requires `root`; some devices never answer any probe and stay `Unknown`.
 - Concurrent multicast sniffers can theoretically cross-talk, though every
   resolver filters replies by responder IP.

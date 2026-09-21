@@ -1,3 +1,4 @@
+import ssl
 import threading
 import time
 
@@ -140,6 +141,35 @@ def test_get_tls_name_tries_ports_until_match(monkeypatch):
     assert ports == list(tls.TLS.PORTS)
 
 
+def test_fetch_certificate_honors_verify_setting(monkeypatch):
+    class FakeContext:
+        def __init__(self):
+            self.check_hostname = True
+            self.verify_mode = ssl.CERT_NONE
+
+    contexts = []
+
+    def fake_context():
+        context = FakeContext()
+        contexts.append(context)
+        return context
+
+    def fail_connection(*args, **kwargs):
+        raise OSError("no connection")
+
+    monkeypatch.setattr(tls.ssl, "create_default_context", fake_context)
+    monkeypatch.setattr(tls.socket, "create_connection", fail_connection)
+
+    monkeypatch.setattr(tls.TLS, "VERIFY", False)
+    assert tls._fetch_certificate("192.168.1.10", 443, 1) is None
+    assert contexts[-1].verify_mode == ssl.CERT_NONE
+
+    monkeypatch.setattr(tls.TLS, "VERIFY", True)
+    assert tls._fetch_certificate("192.168.1.10", 443, 1) is None
+    assert contexts[-1].verify_mode == ssl.CERT_REQUIRED
+    assert contexts[-1].check_hostname is False
+
+
 def test_tls_runs_after_snmp_before_web_title():
     sources = [source for source, _ in NAME_SOURCES]
 
@@ -239,6 +269,41 @@ def test_get_vendor_skips_locally_administered(monkeypatch):
     monkeypatch.setattr(vendor.mac_lookup, "lookup", fail_lookup)
 
     assert vendor.get_vendor("d2:46:f5:19:e2:1b") == vendor.FALLBACK.VENDOR
+
+
+def test_get_vendor_returns_lookup_result(monkeypatch):
+    monkeypatch.setattr(vendor.mac_lookup, "lookup", lambda mac: "Acme Networks")
+
+    assert vendor.get_vendor("00:1a:2b:3c:4d:5e") == "Acme Networks"
+
+
+def test_vendor_download_blocked_without_opt_in(monkeypatch):
+    async def fail_download(*args, **kwargs):
+        raise AssertionError("OUI download should not run without opt-in")
+
+    monkeypatch.setattr(vendor, "_vendor_download", fail_download)
+    monkeypatch.setattr(vendor.VENDOR, "DOWNLOAD", False)
+
+    with pytest.raises(RuntimeError):
+        vendor.mac_lookup.loop.run_until_complete(
+            vendor.mac_lookup.async_lookup.update_vendors()
+        )
+
+
+def test_vendor_download_runs_when_opted_in(monkeypatch):
+    calls = []
+
+    async def fake_download(*args, **kwargs):
+        calls.append(True)
+
+    monkeypatch.setattr(vendor, "_vendor_download", fake_download)
+    monkeypatch.setattr(vendor.VENDOR, "DOWNLOAD", True)
+
+    vendor.mac_lookup.loop.run_until_complete(
+        vendor.mac_lookup.async_lookup.update_vendors()
+    )
+
+    assert calls == [True]
 
 
 def _mdns_response(ip, *answers):
@@ -637,6 +702,16 @@ def test_get_snmp_name_falls_back_to_sys_descr(monkeypatch):
 
 def test_get_snmp_name_without_response(monkeypatch):
     monkeypatch.setattr(snmp, "sr1", lambda *a, **k: None)
+
+    assert snmp.get_snmp_name("192.168.1.10") is None
+
+
+def test_get_snmp_name_skipped_when_disabled(monkeypatch):
+    def fail_query(*args, **kwargs):
+        raise AssertionError("SNMP should not run when no community is configured")
+
+    monkeypatch.setattr(SNMP_CONST, "ENABLED", False)
+    monkeypatch.setattr(snmp, "sr1", fail_query)
 
     assert snmp.get_snmp_name("192.168.1.10") is None
 

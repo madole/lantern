@@ -80,15 +80,17 @@ Ordered roughly by expected payoff versus effort.
 ### 6. TLS certificate and HTTP metadata — DONE
 
 - On HTTPS, read the certificate CN/SAN for a hostname even when the page title
-  is missing or auth-gated. Handle self-signed certs explicitly.
+  is missing or auth-gated. Self-signed certificates are read without chain
+  verification by default; `LANTERN_TLS_VERIFY=1` requires a trusted chain.
 - Collect the `Server` response header and try the title on common alternate
   ports (8080, 8443, 8000, ...), not just 80/443.
 
 ### 7. SNMP — DONE
 
-- Attempt `sysName` / `sysDescr` with community `public`.
+- Attempt `sysName` / `sysDescr` with the community from
+  `LANTERN_SNMP_COMMUNITY` (default `public`).
 - Excellent detail (model, firmware, OS) for managed switches, printers, and
-  NAS boxes; silent when SNMP is disabled.
+  NAS boxes; silent when SNMP is disabled (empty community).
 
 ### 8. Service banners — DONE
 
@@ -200,6 +202,10 @@ What shipped:
    in/out-of-subnet dispatch, SSDP/passive filtering, and asserts the wire
    formats are read-only (`SNMPget`, `M-SEARCH`) and that a mutating operation
    is rejected.
+6. **No unsolicited internet egress.** The OUI vendor list is only downloaded
+   when `LANTERN_OUI_DOWNLOAD=1`; otherwise `mac_vendor_lookup`'s implicit fetch
+   is blocked and only a locally provisioned list is used. SNMP probing can be
+   turned off by clearing its community.
 
 Concurrency was already bounded (`NAME.MAX_DEVICE_WORKERS`, `NAME.MAX_WORKERS`)
 and there are no retry loops, so probes cannot flood the segment. The explicit

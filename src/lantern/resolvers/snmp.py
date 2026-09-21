@@ -49,6 +49,10 @@ def _varbind_values(reply):
 
 def get_snmp_name(ip_address, timeout=SNMP.TIMEOUT):
     """Read a device's sysName (falling back to sysDescr) over SNMP."""
+    if not SNMP.ENABLED:
+        logger.debug("SNMP disabled (no community configured); skipping {}", ip_address)
+        return None
+
     logger.debug("Querying SNMP sysName/sysDescr for IP: {}", ip_address)
     try:
         reply = sr1(

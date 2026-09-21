@@ -61,10 +61,12 @@ def clean_cert_name(name, ip_address):
 def _fetch_certificate(ip_address, port, timeout):
     """Open a TLS connection and return the peer's decoded certificate."""
     context = ssl.create_default_context()
-    # Devices routinely present self-signed or mismatched certificates; we only
-    # want the certificate contents, so skip chain and hostname verification.
+    # Devices are addressed by IP and rarely carry an IP SAN, so hostname
+    # verification is always off. Chain verification is off by default because
+    # device certificates are usually self-signed; set LANTERN_TLS_VERIFY=1 to
+    # require a trusted chain instead of reading whatever is presented.
     context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
+    context.verify_mode = ssl.CERT_REQUIRED if TLS.VERIFY else ssl.CERT_NONE
 
     try:
         with socket.create_connection((ip_address, port), timeout=timeout) as sock:

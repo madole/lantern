@@ -1,3 +1,11 @@
+import os
+
+
+def _env_flag(name):
+    """Read a boolean-ish environment flag; anything else (or unset) is False."""
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 class LOGGING:
     LEVEL_DEBUG = "DEBUG"
     LEVEL_INFO = "INFO"
@@ -32,7 +40,12 @@ class NETBIOS:
 class SNMP:
     PORT = 161
     TIMEOUT = 2
-    COMMUNITY = "public"
+    # Read-only community string. It defaults to the well-known "public" but is
+    # overridable; setting it empty disables SNMP probing entirely so a scan
+    # never sends default credentials to the network.
+    COMMUNITY_ENV = "LANTERN_SNMP_COMMUNITY"
+    COMMUNITY = os.getenv(COMMUNITY_ENV, "public").strip()
+    ENABLED = bool(COMMUNITY)
     # Scalar OIDs for the two name-ish values: sysName is the configured name,
     # sysDescr is the free-form description (model/OS/firmware).
     SYS_NAME = "1.3.6.1.2.1.1.5.0"
@@ -207,6 +220,11 @@ class TLS:
     PORTS = (443, 8443)
     SAN_KINDS = ("DNS",)
     COMMON_NAME = "commonName"
+    # Devices routinely present self-signed or IP-addressed certificates, so by
+    # default we read the certificate without verifying the chain (we only want
+    # the name it carries). Set LANTERN_TLS_VERIFY=1 to require a trusted chain.
+    VERIFY_ENV = "LANTERN_TLS_VERIFY"
+    VERIFY = _env_flag(VERIFY_ENV)
 
 
 class TABLE:
@@ -217,6 +235,15 @@ class TABLE:
 class FALLBACK:
     NAME = "Unknown"
     VENDOR = "Unknown Vendor"
+
+
+class VENDOR:
+    # mac_vendor_lookup downloads the IEEE OUI list over the internet the first
+    # time a vendor is looked up. That is unsolicited egress from a root tool, so
+    # it is opt-in; otherwise only a locally provisioned list is used and
+    # unknown vendors stay "Unknown Vendor".
+    DOWNLOAD_ENV = "LANTERN_OUI_DOWNLOAD"
+    DOWNLOAD = _env_flag(DOWNLOAD_ENV)
 
 
 ENCODING = "utf-8"
