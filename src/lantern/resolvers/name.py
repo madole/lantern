@@ -23,6 +23,7 @@ from lantern.resolvers.ssdp import (
 )
 from lantern.resolvers.tls import get_tls_name
 from lantern.resolvers.web import get_web_title
+from lantern.scope import is_in_scope
 
 # Ordered by priority: the first non-empty result wins, regardless of which
 # lookup finishes first. Kept as (label, resolver) pairs so tests and callers
@@ -98,6 +99,9 @@ def prefetch_scan_names():
 
 def _run_source(source, resolver, ip_address, device):
     """Call a resolver, tagging any logs it emits with its device context."""
+    if not is_in_scope(ip_address):
+        logger.debug("Skipping {} for out-of-scope {}", source, ip_address)
+        return None
     with logger.contextualize(device=device or "-"):
         return resolver(ip_address)
 
@@ -182,6 +186,10 @@ def resolve_name(ip_address, device=None):
     spends time on them. A total deadline caps how long one device can stall
     the scan.
     """
+    if not is_in_scope(ip_address):
+        logger.warning("Refusing to probe out-of-scope address {}", ip_address)
+        return FALLBACK.NAME
+
     executor = _get_executor()
     deadline = time.monotonic() + NAME.DEADLINE
 

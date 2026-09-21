@@ -98,7 +98,7 @@ Ordered roughly by expected payoff versus effort.
 
 ## Future considerations
 
-Follow-ups beyond the name-source work; A is done, B-D remain.
+Follow-ups beyond the name-source work; A and D are done, B-C remain.
 
 ### A. Concurrency and a per-device time budget — DONE
 
@@ -176,12 +176,32 @@ but collapses them to one string (`ssdp.py:34`). Return a record so `model` and
 source, and carry the same source/confidence treatment from B. Feeds the goal's
 "model, services, OS hints" without forcing a name.
 
-### D. Read-only and LAN-scoped guardrails
+### D. Read-only and LAN-scoped guardrails — DONE
 
-- Assert every probed IP belongs to the scanned subnet before sending; extend
-  the membership filter already used for passive MACs (`main.py:47`).
-- Stay read-only: no SNMP `set`, no UPnP actions, no credential attempts.
-- Device naming must never leave the LAN; the explicit `8.8.8.8` use is only for
-  local-IP detection and should stay that way.
-- Cap concurrency and retries so probes cannot accidentally flood the segment,
-  and add a regression test that a resolver is skipped for out-of-subnet IPs.
+What shipped:
+
+1. **A single scope module.** `scope.py` owns two policies. It holds the
+   scanned subnet (registered once per scan) and answers `is_in_scope` /
+   `require_in_scope`; and it holds the read-only policy via `READ_ONLY` plus
+   `require_read_only`, which rejects any operation that is not a known
+   read-only probe.
+2. **Scope registration in `scan_network`.** `main.py` parses the range and
+   calls `set_scan_network` before any probe, clearing it in a `finally`. The
+   passive-MAC membership filter (`main.py`) now reuses `is_in_scope` instead of
+   a local `ipaddress` check.
+3. **Out-of-subnet probes are skipped, not sent.** `resolve_name` and
+   `_run_source` refuse off-subnet addresses, so no name source is dispatched
+   for them. SSDP discovery and the passive SSDP description fetch also filter
+   responders by scope before fetching a description.
+4. **Read-only is executable.** SNMP builds only an `SNMPget` and SSDP sends
+   only an `M-SEARCH`; both call `require_read_only`. No `set`, action, or
+   credential path exists.
+5. **Regression tests.** `tests/test_guardrails.py` covers membership parsing,
+   in/out-of-subnet dispatch, SSDP/passive filtering, and asserts the wire
+   formats are read-only (`SNMPget`, `M-SEARCH`) and that a mutating operation
+   is rejected.
+
+Concurrency was already bounded (`NAME.MAX_DEVICE_WORKERS`, `NAME.MAX_WORKERS`)
+and there are no retry loops, so probes cannot flood the segment. The explicit
+`8.8.8.8` use remains local-IP detection only and sends no packet.
+

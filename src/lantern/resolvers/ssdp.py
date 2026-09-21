@@ -6,6 +6,7 @@ from scapy.all import IP, UDP, AsyncSniffer, Ether, Raw, sendp
 
 from lantern.constants import ENCODING, SSDP, WEB
 from lantern.logger import logger
+from lantern.scope import is_in_scope, require_read_only
 
 # Scan-scoped caches. ``_locations`` maps a responder IP to its description
 # URL and ``_names`` to the name parsed from it. ``_discovery_done`` records
@@ -88,6 +89,8 @@ def get_ssdp_description(location, timeout=SSDP.HTTP_TIMEOUT):
 
 def _ssdp_search(timeout):
     """Broadcast one M-SEARCH and return every ``(ip, location)`` seen."""
+    require_read_only("ssdp search")
+
     request = (
         f"{SSDP.SEARCH_METHOD} {SSDP.SEARCH_TARGET} HTTP/1.1\r\n"
         f"HOST: {SSDP.ADDR}:{SSDP.PORT}\r\n"
@@ -137,6 +140,9 @@ def discover_ssdp(timeout=SSDP.TIMEOUT):
     global _discovery_done
     logger.debug("Discovering SSDP/UPnP devices on the LAN")
     for ip_address, location in _ssdp_search(timeout):
+        if not is_in_scope(ip_address):
+            logger.debug("Ignoring out-of-scope SSDP responder {}", ip_address)
+            continue
         _locations.setdefault(ip_address, location)
     _discovery_done = True
     logger.debug("SSDP discovery found {} device(s)", len(_locations))
@@ -146,7 +152,7 @@ def discover_ssdp(timeout=SSDP.TIMEOUT):
 def resolve_ssdp_names():
     """Fetch every discovered description once and cache the parsed names."""
     for ip_address, location in list(_locations.items()):
-        if ip_address in _names:
+        if ip_address in _names or not is_in_scope(ip_address):
             continue
         name = get_ssdp_description(location)
         if name:

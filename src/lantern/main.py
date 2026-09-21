@@ -1,4 +1,3 @@
-import ipaddress
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +21,7 @@ from lantern.resolvers import (
     resolve_name,
     shutdown_name_state,
 )
+from lantern.scope import clear_scan_network, is_in_scope, set_scan_network
 
 
 def _resolve_device(entry):
@@ -40,42 +40,47 @@ def scan_network(ip_range: str):
     logger.info("Starting ARP scan of {}", ip_range)
     started = time.monotonic()
 
+    # Confine every active probe to the requested subnet.
+    set_scan_network(ip_range)
+
     reset_mdns_service_cache()
     reset_ssdp_cache()
     reset_name_state()
 
-    # Listen for self-announcements in parallel with the active ARP probe.
-    sniffer = start_passive_scan()
+    try:
+        # Listen for self-announcements in parallel with the active ARP probe.
+        sniffer = start_passive_scan()
 
-    arp_request = ARP(pdst=ip_range)
+        arp_request = ARP(pdst=ip_range)
 
-    ether_frame = Ether(dst=NETWORK.BROADCAST_MAC)
+        ether_frame = Ether(dst=NETWORK.BROADCAST_MAC)
 
-    packet = ether_frame / arp_request
+        packet = ether_frame / arp_request
 
-    results = srp(packet, timeout=NETWORK.ARP_TIMEOUT, verbose=False)
+        results = srp(packet, timeout=NETWORK.ARP_TIMEOUT, verbose=False)
 
-    hosts = results[0]
-    logger.info("ARP scan found {} host(s)", len(hosts))
+        hosts = results[0]
+        logger.info("ARP scan found {} host(s)", len(hosts))
 
-    finish_passive_scan(sniffer)
+        finish_passive_scan(sniffer)
 
-    found = {received.psrc: received.hwsrc for _sent, received in hosts}
-    network = ipaddress.ip_network(ip_range, strict=False)
-    for ip, mac in get_passive_macs().items():
-        if ipaddress.ip_address(ip) in network:
-            found.setdefault(ip, mac)
+        found = {received.psrc: received.hwsrc for _sent, received in hosts}
+        for ip, mac in get_passive_macs().items():
+            if is_in_scope(ip):
+                found.setdefault(ip, mac)
 
-    # Broadcast lookups answer for every host at once, so do them once before
-    # resolving devices rather than repeating them per device.
-    prefetch_scan_names()
+        # Broadcast lookups answer for every host at once, so do them once before
+        # resolving devices rather than repeating them per device.
+        prefetch_scan_names()
 
-    with ThreadPoolExecutor(max_workers=NAME.MAX_DEVICE_WORKERS) as pool:
-        devices = list(pool.map(_resolve_device, found.items()))
+        with ThreadPoolExecutor(max_workers=NAME.MAX_DEVICE_WORKERS) as pool:
+            devices = list(pool.map(_resolve_device, found.items()))
 
-    # Let any lookups still in flight finish before reporting, so nothing
-    # continues after the table is printed.
-    shutdown_name_state()
+        # Let any lookups still in flight finish before reporting, so nothing
+        # continues after the table is printed.
+        shutdown_name_state()
+    finally:
+        clear_scan_network()
 
     elapsed = time.monotonic() - started
     if devices:

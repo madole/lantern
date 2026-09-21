@@ -4,10 +4,12 @@ from scapy.layers.snmp import SNMPget, SNMPvarbind
 
 from lantern.constants import ENCODING, SNMP
 from lantern.logger import logger
+from lantern.scope import require_read_only
 
 
 def _build_query(ip_address, oids):
     """Build an SNMP v2c GET for the given OIDs using the read-only community."""
+    require_read_only("snmp get")
     return (
         IP(dst=ip_address)
         / UDP(sport=SNMP.PORT, dport=SNMP.PORT)

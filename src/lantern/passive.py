@@ -11,6 +11,7 @@ from yaspin import yaspin
 
 from lantern.constants import ENCODING, MDNS, PASSIVE, SSDP
 from lantern.logger import logger
+from lantern.scope import is_in_scope
 
 _names = {}
 _macs = {}
@@ -230,7 +231,7 @@ def get_passive_name(ip_address):
 def resolve_passive_names():
     """Fetch every passively-observed SSDP description once, up front."""
     for ip_address, location in list(_locations.items()):
-        if ip_address in _names:
+        if ip_address in _names or not is_in_scope(ip_address):
             continue
         name = _fetch_ssdp_description(location)
         if name:

@@ -100,8 +100,11 @@ Layout: `src/lantern/` (package, `resolvers/` per protocol), `tests/`,
 
 ## Safety & limitations
 
-- **Read-only**: no SNMP `set`, no UPnP actions, no credential attempts.
-- Probes stay on the local subnet; naming never leaves the LAN.
+- **Read-only**: only SNMP `GET`, SSDP `M-SEARCH`, and HTTP/TLS reads — no
+  SNMP `set`, no UPnP actions, no credential attempts. Each probe passes through
+  `scope.require_read_only` and the wire format is asserted in the tests.
+- **LAN-scoped**: every active probe is checked against the scanned subnet
+  (`scope.is_in_scope`); an out-of-subnet address is skipped rather than sent.
 - Requires `root`; some devices never answer any probe and stay `Unknown`.
 - Concurrent multicast sniffers can theoretically cross-talk, though every
   resolver filters replies by responder IP.
