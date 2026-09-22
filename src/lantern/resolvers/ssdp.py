@@ -1,3 +1,4 @@
+import concurrent.futures
 import ipaddress
 import urllib.error
 import urllib.parse
@@ -208,13 +209,30 @@ def discover_ssdp(timeout=SSDP.TIMEOUT):
 
 
 def resolve_ssdp_names():
-    """Fetch every discovered description once and cache the parsed names."""
-    for ip_address, location in list(_locations.items()):
-        if ip_address in _names or not is_in_scope(ip_address):
-            continue
-        name = get_ssdp_description(location)
-        if name:
-            _names[ip_address] = name
+    """Fetch every discovered description once and cache the parsed names.
+
+    Descriptions are independent HTTP round-trips, so they are fetched
+    concurrently; names are merged on this thread to keep the cache single-writer.
+    """
+    targets = [
+        (ip_address, location)
+        for ip_address, location in list(_locations.items())
+        if ip_address not in _names and is_in_scope(ip_address)
+    ]
+    if not targets:
+        return dict(_names)
+
+    workers = min(SSDP.MAX_FETCH_WORKERS, len(targets))
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="ssdp-name"
+    ) as pool:
+        fetched = pool.map(
+            lambda pair: (pair[0], get_ssdp_description(pair[1])), targets
+        )
+        for ip_address, name in fetched:
+            if name:
+                _names[ip_address] = name
+
     return dict(_names)
 
 

@@ -10,16 +10,18 @@ from lantern.logger import logger
 from lantern.passive import (
     finish_passive_scan,
     get_passive_macs,
+    resolve_passive_names,
     start_passive_scan,
 )
 from lantern.resolvers import (
+    finish_prefetch_broadcast,
     get_vendor,
-    prefetch_scan_names,
     reset_mdns_service_cache,
     reset_name_state,
     reset_ssdp_cache,
     resolve_name,
     shutdown_name_state,
+    start_prefetch_broadcast,
 )
 from lantern.scope import clear_scan_network, is_in_scope, set_scan_network
 
@@ -51,27 +53,37 @@ def scan_network(ip_range: str):
         # Listen for self-announcements in parallel with the active ARP probe.
         sniffer = start_passive_scan()
 
-        arp_request = ARP(pdst=ip_range)
+        # The scan-wide broadcasts also depend only on the network, not on the
+        # ARP results or the passive cache, so start them now and let them
+        # overlap the listening window instead of running after it.
+        broadcast = start_prefetch_broadcast()
 
-        ether_frame = Ether(dst=NETWORK.BROADCAST_MAC)
+        try:
+            arp_request = ARP(pdst=ip_range)
 
-        packet = ether_frame / arp_request
+            ether_frame = Ether(dst=NETWORK.BROADCAST_MAC)
 
-        results = srp(packet, timeout=NETWORK.ARP_TIMEOUT, verbose=False)
+            packet = ether_frame / arp_request
 
-        hosts = results[0]
-        logger.info("ARP scan found {} host(s)", len(hosts))
+            results = srp(packet, timeout=NETWORK.ARP_TIMEOUT, verbose=False)
 
-        finish_passive_scan(sniffer)
+            hosts = results[0]
+            logger.info("ARP scan found {} host(s)", len(hosts))
+
+            finish_passive_scan(sniffer)
+        finally:
+            # Always drain the broadcasts, even if the probe raised, so no
+            # prefetch thread outlives the scan and races the next one.
+            finish_prefetch_broadcast(broadcast)
 
         found = {received.psrc: received.hwsrc for _sent, received in hosts}
         for ip, mac in get_passive_macs().items():
             if is_in_scope(ip):
                 found.setdefault(ip, mac)
 
-        # Broadcast lookups answer for every host at once, so do them once before
-        # resolving devices rather than repeating them per device.
-        prefetch_scan_names()
+        # The passive listener's own SSDP descriptions can only be fetched once
+        # it has been joined; the broadcast sources already ran above.
+        resolve_passive_names()
 
         with ThreadPoolExecutor(max_workers=NAME.MAX_DEVICE_WORKERS) as pool:
             devices = list(pool.map(_resolve_device, found.items()))

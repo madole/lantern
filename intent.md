@@ -60,10 +60,14 @@ Ordered roughly by expected payoff versus effort.
 
 ### 3. Passive listening — DONE
 
-- Sniff the LAN for a bounded window (30-60s) and harvest self-announced data
-  from ARP, mDNS, SSDP, DHCP, and LLMNR traffic.
+- Sniff the LAN and harvest self-announced data from ARP, mDNS, SSDP, DHCP, and
+  LLMNR traffic. Runs once in parallel with the active scan.
+- The window is adaptive: it closes once the wire has been quiet for
+  `PASSIVE.QUIET_PERIOD` (after a `PASSIVE.MIN_WINDOW` floor) or at the
+  `PASSIVE.TIMEOUT` ceiling, so a quiet LAN finishes in seconds while a busy one
+  keeps listening.
 - Catches devices that ignore active probes and reveals names before/without
-  querying. Best run once in parallel with the active scan.
+  querying.
 - Requires no extra privileges beyond what ARP scanning already needs.
 
 ### 4. LLMNR — DONE
@@ -116,7 +120,7 @@ Follow-ups beyond the name-source work; A and D are done, B-C remain.
 | TLS | 1s x 2 ports |
 | web title | 1s x 7 candidates |
 
-So ~20-25s per device, multiplied by device count, on top of the 30s passive
+So ~20-25s per device, multiplied by device count, on top of the passive
 window. On a busy /24 this dominated total runtime.
 
 What shipped:
@@ -127,7 +131,11 @@ What shipped:
    and collect every responder's `LOCATION` into an `IP -> name` cache. The
    passive listener's SSDP descriptions are fetched once via
    `resolve_passive_names`. `get_ssdp_name` reads the cache and only falls back
-   to a targeted per-host search when no scan-wide discovery ran.
+   to a targeted per-host search when no scan-wide discovery ran. The prefetch
+   is split so the broadcast half (`prefetch_broadcast_names`) starts *before*
+   the ARP scan and overlaps the passive window, while `resolve_passive_names`
+   runs once the listener is joined; each half fans its independent work out
+   over a small pool.
 2. **Concurrent device sources with a deadline, in tiers.** `resolve_name` runs
    all fast `NAME_SOURCES` together in a shared `ThreadPoolExecutor`, returning
    the highest-priority success as soon as no still-running source outranks it
@@ -148,12 +156,14 @@ What shipped:
    `reset_name_state` / `reset_ssdp_cache`. Device context is passed into pooled
    lookups so their logs keep the `IP (MAC)` label.
 
-Remaining: the `NAME.*` values are not yet env-overridable. Concurrent multicast
-sniffers on UDP/5353 and UDP/1900 can theoretically cross-talk, though every
-resolver filters by responder IP and the scan-scoped maps remove most of the
-need. Early exit still leaves already-running fast-tier lookups to finish (the
-drain absorbs them), but the slow TLS/web tier is never started for a device
-that the fast tier already named.
+Remaining: concurrent multicast sniffers on UDP/5353 and UDP/1900 can
+theoretically cross-talk, though every resolver filters by responder IP and the
+scan-scoped maps remove most of the need. The adaptive passive window trades
+coverage for latency: stopping after a quiet period can miss a device that
+would have announced only after several seconds of silence. Early exit still
+leaves already-running fast-tier lookups to finish (the drain absorbs them), but
+the slow TLS/web tier is never started for a device that the fast tier already
+named.
 
 ### B. Source and confidence reporting
 

@@ -6,6 +6,10 @@ devices ignore active probes but still broadcast, so this runs alongside the
 ARP scan and feeds the normal name-resolution chain.
 """
 
+import concurrent.futures
+import threading
+import time
+
 from scapy.all import ARP, BOOTP, DHCP, DNS, IP, UDP, AsyncSniffer, Raw
 from yaspin import yaspin
 
@@ -19,6 +23,12 @@ _macs = {}
 _locations = {}
 _sniffer = None
 _spinner = None
+# Wall-clock bookkeeping for the adaptive listening window. ``_last_observation``
+# is written by the sniffer thread and read by the joining thread, so it is
+# guarded; ``_listen_started`` is only touched by the caller thread.
+_observation_lock = threading.Lock()
+_last_observation = 0.0
+_listen_started = 0.0
 
 
 def _stop_spinner():
@@ -30,12 +40,32 @@ def _stop_spinner():
 
 def reset_passive_cache():
     """Drop everything the previous scan learned before a new one starts."""
-    global _sniffer
+    global _sniffer, _last_observation, _listen_started
     _stop_spinner()
     _names.clear()
     _macs.clear()
     _locations.clear()
     _sniffer = None
+    with _observation_lock:
+        _last_observation = 0.0
+    _listen_started = 0.0
+
+
+def _note_observation():
+    """Record that the wire is active right now; keeps the window open."""
+    global _last_observation
+    with _observation_lock:
+        _last_observation = time.monotonic()
+
+
+def _quiet_reached():
+    """Whether the listener may stop: minimum window served and wire silent."""
+    with _observation_lock:
+        last = _last_observation
+    now = time.monotonic()
+    if now - _listen_started < PASSIVE.MIN_WINDOW:
+        return False
+    return now - last >= PASSIVE.QUIET_PERIOD
 
 
 def _decode(value):
@@ -181,6 +211,7 @@ def parse_ssdp(pkt):
 def _remember(ip_address, names):
     if ip_address and names and ip_address not in _names:
         _names[ip_address] = names[0]
+        _note_observation()
 
 
 def _handle(pkt):
@@ -188,7 +219,9 @@ def _handle(pkt):
         arp = parse_arp(pkt)
         if arp:
             ip_address, mac = arp
-            _macs.setdefault(ip_address, mac)
+            if ip_address not in _macs:
+                _macs[ip_address] = mac
+                _note_observation()
             return
 
         for parser in (parse_dhcp, parse_mdns, parse_llmnr):
@@ -200,7 +233,9 @@ def _handle(pkt):
         ssdp = parse_ssdp(pkt)
         if ssdp:
             ip_address, location = ssdp
-            _locations.setdefault(ip_address, location)
+            if ip_address not in _locations:
+                _locations[ip_address] = location
+                _note_observation()
     except Exception as error:
         logger.trace("Passive listener ignored a packet: {}", error)
 
@@ -228,13 +263,30 @@ def get_passive_name(ip_address):
 
 
 def resolve_passive_names():
-    """Fetch every passively-observed SSDP description once, up front."""
-    for ip_address, location in list(_locations.items()):
-        if ip_address in _names or not is_in_scope(ip_address):
-            continue
-        name = _fetch_ssdp_description(location)
-        if name:
-            _names[ip_address] = name
+    """Fetch every passively-observed SSDP description once, up front.
+
+    The fetches are independent HTTP round-trips, so they run concurrently;
+    parsed names are merged back on this thread to keep the cache single-writer.
+    """
+    targets = [
+        (ip_address, location)
+        for ip_address, location in list(_locations.items())
+        if ip_address not in _names and is_in_scope(ip_address)
+    ]
+    if not targets:
+        return dict(_names)
+
+    workers = min(PASSIVE.MAX_FETCH_WORKERS, len(targets))
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="passive-name"
+    ) as pool:
+        fetched = pool.map(
+            lambda pair: (pair[0], _fetch_ssdp_description(pair[1])), targets
+        )
+        for ip_address, name in fetched:
+            if name:
+                _names[ip_address] = name
+
     return dict(_names)
 
 
@@ -244,19 +296,52 @@ def get_passive_macs():
 
 def start_passive_scan(timeout=PASSIVE.TIMEOUT):
     """Start sniffing in the background; returns the running sniffer."""
-    global _sniffer, _spinner
+    global _sniffer, _spinner, _last_observation, _listen_started
     reset_passive_cache()
+    _listen_started = time.monotonic()
+    with _observation_lock:
+        _last_observation = _listen_started
     _sniffer = AsyncSniffer(
         filter=PASSIVE.FILTER,
         prn=_handle,
         store=False,
         timeout=timeout,
     )
-    logger.info("Listening passively for {}s", timeout)
-    _spinner = yaspin(text=f"Listening passively for {timeout}s", color="cyan")
+    logger.info("Listening passively for up to {}s", timeout)
+    _spinner = yaspin(text=f"Listening passively for up to {timeout}s", color="cyan")
     _spinner.start()
     _sniffer.start()
     return _sniffer
+
+
+def _listener_alive(sniffer):
+    """Whether the sniffer's capture thread is still running.
+
+    ``AsyncSniffer`` exposes its thread; tests substitute a lighter fake that
+    only carries ``running``.
+    """
+    thread = getattr(sniffer, "thread", None)
+    if thread is not None:
+        return thread.is_alive()
+    return getattr(sniffer, "running", False)
+
+
+def _drain_until_quiet(sniffer):
+    """Block until the sniffer stops on its own or the wire has gone quiet.
+
+    The ARP scan is a burst of traffic the listener also sees, so on a quiet
+    LAN the window closes shortly after the scan finishes instead of always
+    waiting out ``PASSIVE.TIMEOUT``. A chatty network keeps resetting the
+    quiet timer and runs to the ceiling.
+    """
+    while _listener_alive(sniffer):
+        sniffer.join(timeout=PASSIVE.POLL_INTERVAL)
+        if not _listener_alive(sniffer):
+            break
+        if _quiet_reached():
+            logger.debug("Passive listener stopping early: wire has gone quiet")
+            sniffer.stop()
+            break
 
 
 def finish_passive_scan(sniffer=None):
@@ -268,7 +353,7 @@ def finish_passive_scan(sniffer=None):
         return
 
     try:
-        sniffer.join()
+        _drain_until_quiet(sniffer)
     except Exception as error:
         logger.debug("Passive listener stopped with an error: {}", error)
     finally:

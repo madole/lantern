@@ -604,7 +604,49 @@ def test_prefetch_scan_names_runs_scan_scoped_sources(monkeypatch):
 
     name.prefetch_scan_names()
 
-    assert events == ["mdns", "ssdp", "ssdp-names", "passive"]
+    # mDNS and SSDP run concurrently, so only their relative order is fixed:
+    # discovery must precede the description fetch, and the passive cache is
+    # read last, after the passive listener has been joined by the caller.
+    assert set(events) == {"mdns", "ssdp", "ssdp-names", "passive"}
+    assert events.index("ssdp") < events.index("ssdp-names")
+    assert events[-1] == "passive"
+
+
+def test_prefetch_broadcast_names_runs_without_passive(monkeypatch):
+    events = []
+    monkeypatch.setattr(name, "browse_mdns_services", lambda: events.append("mdns"))
+    monkeypatch.setattr(name, "discover_ssdp", lambda: events.append("ssdp"))
+    monkeypatch.setattr(name, "resolve_ssdp_names", lambda: events.append("ssdp-names"))
+    monkeypatch.setattr(name, "resolve_passive_names", lambda: events.append("passive"))
+
+    name.prefetch_broadcast_names()
+
+    assert set(events) == {"mdns", "ssdp", "ssdp-names"}
+
+
+def test_start_prefetch_broadcast_returns_joinable_thread(monkeypatch):
+    events = []
+    monkeypatch.setattr(name, "browse_mdns_services", lambda: events.append("mdns"))
+    monkeypatch.setattr(name, "discover_ssdp", lambda: events.append("ssdp"))
+    monkeypatch.setattr(name, "resolve_ssdp_names", lambda: events.append("ssdp-names"))
+
+    thread = name.start_prefetch_broadcast()
+    name.finish_prefetch_broadcast(thread)
+
+    assert set(events) == {"mdns", "ssdp", "ssdp-names"}
+    assert not thread.is_alive()
+
+
+def test_broadcast_prefetch_failure_is_logged_not_raised(monkeypatch):
+    def boom():
+        raise RuntimeError("no multicast here")
+
+    monkeypatch.setattr(name, "prefetch_broadcast_names", boom)
+
+    thread = name.start_prefetch_broadcast()
+    name.finish_prefetch_broadcast(thread)
+
+    assert not thread.is_alive()
 
 
 def test_discover_ssdp_collects_locations(monkeypatch):

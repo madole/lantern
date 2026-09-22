@@ -16,10 +16,13 @@ from lantern.resolvers.mdns import (
 from lantern.resolvers.name import (
     NAME_SOURCES,
     SCAN_SOURCES,
+    finish_prefetch_broadcast,
+    prefetch_broadcast_names,
     prefetch_scan_names,
     reset_name_state,
     resolve_name,
     shutdown_name_state,
+    start_prefetch_broadcast,
 )
 from lantern.resolvers.netbios import get_net_bios_name
 from lantern.resolvers.router_dns import get_gateway_ip, get_router_dns_name
@@ -48,6 +51,7 @@ __all__ = [
     "certificate_names",
     "clean_cert_name",
     "discover_ssdp",
+    "finish_prefetch_broadcast",
     "get_gateway_ip",
     "get_hostname",
     "get_llmnr_name",
@@ -67,6 +71,7 @@ __all__ = [
     "parse_ssdp_description",
     "parse_ssdp_location",
     "parse_smb_name",
+    "prefetch_broadcast_names",
     "prefetch_scan_names",
     "reset_mdns_service_cache",
     "reset_name_state",
@@ -74,4 +79,5 @@ __all__ = [
     "resolve_name",
     "resolve_ssdp_names",
     "shutdown_name_state",
+    "start_prefetch_broadcast",
 ]

@@ -9,7 +9,8 @@ human-readable names. Vendor is resolved from the MAC OUI.
 ## What it does
 
 - **Discovers** hosts with an ARP scan and a parallel passive listener
-  (ARP, DHCP, mDNS, SSDP, LLMNR).
+  (ARP, DHCP, mDNS, SSDP, LLMNR) whose listening window closes early once the
+  wire goes quiet.
 - **Identifies** each host via a priority-ordered chain of name sources,
   falling back to `Unknown` only when every source comes up empty.
 - **Reports** a `grid` table of `IP | MAC | Name | Vendor` on stdout, with
@@ -96,7 +97,20 @@ results table is written to stdout; logs go to stderr.
   recipe sets this for you; `LANTERN_SNMP_COMMUNITY` and `LANTERN_TLS_VERIFY`
   pass through it as well.
 - All timeouts, ports, and concurrency limits live in
-  [`src/lantern/constants.py`](src/lantern/constants.py).
+  [`src/lantern/constants.py`](src/lantern/constants.py). The timing and
+  concurrency knobs are environment-overridable; a malformed or too-small value
+  falls back to the built-in default.
+  - `LANTERN_NAME_DEADLINE` — seconds per device across both tiers.
+  - `LANTERN_NAME_MAX_DEVICE_WORKERS`, `LANTERN_NAME_MAX_WORKERS` — device and
+    resolver pool sizes.
+  - `LANTERN_NAME_PREFETCH_WORKERS` — threads for the scan-wide broadcast
+    prefetch (mDNS vs SSDP).
+  - `LANTERN_PASSIVE_TIMEOUT` — ceiling on the passive listening window.
+  - `LANTERN_PASSIVE_QUIET_PERIOD`, `LANTERN_PASSIVE_MIN_WINDOW` — how long the
+    listener waits for silence, and the floor before it may stop early.
+  - `LANTERN_PASSIVE_POLL_INTERVAL` — how often it checks for silence.
+  - `LANTERN_PASSIVE_MAX_FETCH_WORKERS`, `LANTERN_SSDP_MAX_FETCH_WORKERS` —
+    concurrent SSDP description fetches.
 - There are no CLI arguments yet; the scan range is derived from the local IP.
 
 ## Development

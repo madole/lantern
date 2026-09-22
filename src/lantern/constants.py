@@ -6,6 +6,34 @@ def _env_flag(name):
     return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_int(name, default, minimum=None):
+    """Read an integer override; unset, malformed, or below ``minimum`` -> default."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if minimum is not None and value < minimum:
+        return default
+    return value
+
+
+def _env_float(name, default, minimum=None):
+    """Read a float override; unset, malformed, or below ``minimum`` -> default."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if minimum is not None and value < minimum:
+        return default
+    return value
+
+
 class LOGGING:
     LEVEL_DEBUG = "DEBUG"
     LEVEL_INFO = "INFO"
@@ -111,7 +139,30 @@ class ROUTER_DNS:
 
 
 class PASSIVE:
-    TIMEOUT = 30
+    # Every knob here is env-overridable (see README); a malformed or
+    # too-small value falls back to the default.
+    TIMEOUT_ENV = "LANTERN_PASSIVE_TIMEOUT"
+    QUIET_PERIOD_ENV = "LANTERN_PASSIVE_QUIET_PERIOD"
+    MIN_WINDOW_ENV = "LANTERN_PASSIVE_MIN_WINDOW"
+    POLL_INTERVAL_ENV = "LANTERN_PASSIVE_POLL_INTERVAL"
+    MAX_FETCH_WORKERS_ENV = "LANTERN_PASSIVE_MAX_FETCH_WORKERS"
+
+    # Hard ceiling on the passive listening window. The listener stops as soon
+    # as the wire has gone quiet (see QUIET_PERIOD), so this is only reached on
+    # a network that keeps announcing new devices.
+    TIMEOUT = _env_float(TIMEOUT_ENV, 30.0, minimum=0.0)
+    # Stop once no new announcement has been heard for this long. A quiet
+    # network therefore finishes in seconds instead of waiting out TIMEOUT,
+    # while a busy one keeps listening up to the ceiling.
+    QUIET_PERIOD = _env_float(QUIET_PERIOD_ENV, 3.0, minimum=0.0)
+    # Never stop before this much wall-clock has elapsed since the listener
+    # started, so an initial lull (before devices respond to the ARP scan) is
+    # not mistaken for the end of the chatter.
+    MIN_WINDOW = _env_float(MIN_WINDOW_ENV, 5.0, minimum=0.0)
+    # How often the join loop checks whether the wire has gone quiet.
+    POLL_INTERVAL = _env_float(POLL_INTERVAL_ENV, 0.25, minimum=0.01)
+    # Concurrent description fetches for passively-learned SSDP locations.
+    MAX_FETCH_WORKERS = _env_int(MAX_FETCH_WORKERS_ENV, 8, minimum=1)
     FILTER = (
         "arp or udp port 5353 or udp port 1900 "
         "or udp port 67 or udp port 68 or udp port 5355"
@@ -121,13 +172,23 @@ class PASSIVE:
 
 
 class NAME:
+    # Every timing/concurrency knob here is env-overridable (see README); a
+    # malformed or too-small value falls back to the default.
+    DEADLINE_ENV = "LANTERN_NAME_DEADLINE"
+    MAX_DEVICE_WORKERS_ENV = "LANTERN_NAME_MAX_DEVICE_WORKERS"
+    MAX_WORKERS_ENV = "LANTERN_NAME_MAX_WORKERS"
+    PREFETCH_WORKERS_ENV = "LANTERN_NAME_PREFETCH_WORKERS"
+
     # Total wall-clock budget for one device's device-scoped name lookups.
-    DEADLINE = 10.0
+    DEADLINE = _env_float(DEADLINE_ENV, 10.0, minimum=0.0)
     # Devices resolved in parallel; each runs its sources concurrently.
-    MAX_DEVICE_WORKERS = 4
+    MAX_DEVICE_WORKERS = _env_int(MAX_DEVICE_WORKERS_ENV, 4, minimum=1)
     # Shared pool for per-device sources; large enough that a device's whole
     # chain runs without queuing behind another device's lookups.
-    MAX_WORKERS = 64
+    MAX_WORKERS = _env_int(MAX_WORKERS_ENV, 64, minimum=1)
+    # The scan-wide broadcast prefetch (mDNS browse vs SSDP discovery) runs on
+    # this many threads so the two independent multicasts overlap.
+    PREFETCH_WORKERS = _env_int(PREFETCH_WORKERS_ENV, 2, minimum=1)
     # Slow, low-yield sources only tried when every faster source came up empty.
     DEFERRED_SOURCES = frozenset({"TLS certificate", "web title", "service banner"})
 
@@ -139,6 +200,10 @@ class SSDP:
     TTL = 2
     TIMEOUT = 3
     HTTP_TIMEOUT = 1
+    # Concurrent description fetches during scan-wide name resolution; a
+    # /24 can expose many UPnP devices and fetching them serially is a long tail.
+    MAX_FETCH_WORKERS_ENV = "LANTERN_SSDP_MAX_FETCH_WORKERS"
+    MAX_FETCH_WORKERS = _env_int(MAX_FETCH_WORKERS_ENV, 8, minimum=1)
     MAX_BYTES = 65536
     SEARCH_METHOD = "M-SEARCH"
     SEARCH_TARGET = "*"

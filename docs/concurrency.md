@@ -66,8 +66,8 @@ There are two `ThreadPoolExecutor`s, and they form a parent/child relationship:
 ```mermaid
 flowchart TB
     subgraph main["scan_network (main thread)"]
-        ARP["ARP scan + passive listener"]
-        PRE["prefetch_scan_names()"]
+        ARP["ARP scan + passive listener<br/>+ broadcast prefetch"]
+        PRE["resolve_passive_names()"]
         DEV["Device pool<br/>ThreadPoolExecutor(MAX_DEVICE_WORKERS)"]
         DRAIN["shutdown_name_state()"]
     end
@@ -113,7 +113,10 @@ printed table keeps the host order even though completion order is arbitrary.
 
 ## Scan lifecycle
 
-A scan has four phases. The first two overlap; the last two are bounded.
+The passive listener, the scan-wide broadcast prefetch, and the active ARP
+probe all start together and overlap. The listener and the prefetch are joined
+before the device pool starts, and the device pool is bounded by
+`NAME.DEADLINE` per device and the final drain.
 
 ```mermaid
 sequenceDiagram
@@ -125,12 +128,15 @@ sequenceDiagram
     participant Res as Resolver pool
 
     Main->>Passive: start_passive_scan()
-    Note over Main,ARP: active and passive run concurrently
+    Main->>Pre: start_prefetch_broadcast()
+    Note over Main,ARP: passive, broadcast prefetch,<br/>and active ARP run concurrently
     Main->>ARP: srp(ARP broadcast)
     ARP-->>Main: hosts
-    Main->>Passive: finish_passive_scan() (join)
-    Main->>Pre: prefetch_scan_names()
-    Note over Pre: mDNS browse, SSDP discovery,<br/>passive SSDP descriptions — once for all hosts
+    Main->>Passive: finish_passive_scan() (join; stops early once quiet)
+    Main->>Pre: finish_prefetch_broadcast() (join)
+    Main->>Passive: resolve_passive_names()
+    Note over Pre: mDNS browse and SSDP discovery — once for all hosts
+    Note over Passive: passive SSDP descriptions, once the listener is joined
     Main->>Dev: map(_resolve_device, hosts)
     Dev->>Res: submit fast sources
     Res-->>Dev: highest-priority name
@@ -145,6 +151,24 @@ broadcast/multicast operations that answer for *every* host at once. Doing them
 per device would repeat the same round-trips N times. Prefetch runs them once,
 caches `IP -> name`, and the per-device sources then read from those caches
 (`resolvers/ssdp.py`, `passive.py`, `resolvers/mdns.py`).
+
+Prefetch is split into two parts by what it depends on:
+
+- **Broadcast prefetch** (`prefetch_broadcast_names`) — mDNS browse and SSDP
+  discovery plus description fetch. Neither depends on the ARP results nor on
+  the passive cache, so `start_prefetch_broadcast()` launches them in a
+  background thread *before* the ARP scan and they overlap the passive
+  listening window instead of running after it. The mDNS and SSDP multicasts
+  use different groups and sockets, so they run on two threads
+  (`NAME.PREFETCH_WORKERS`) and finish in roughly the longer of the two.
+- **Passive descriptions** (`resolve_passive_names`) — the SSDP locations the
+  listener overheard. These are only known once the listener has been joined,
+  so this runs after `finish_passive_scan`. Its per-device HTTP fetches are
+  independent, so they run concurrently too (`PASSIVE.MAX_FETCH_WORKERS`),
+  as do SSDP's (`SSDP.MAX_FETCH_WORKERS`).
+
+`prefetch_scan_names()` remains the synchronous one-shot (broadcasts, then
+passive descriptions) for callers that are not overlapping with the listener.
 
 ## The resolver pool and its lock
 
@@ -442,8 +466,12 @@ variables avoid sharing, whereas a lock protects sharing.
 Not all concurrency here comes from the two pools. Several resolvers use
 scapy's `AsyncSniffer`, which runs its capture loop in a background thread:
 
-- the **passive listener** (`passive.py`) sniffs for a 30-second window while
-  the ARP scan runs, harvesting ARP, DHCP, mDNS, SSDP, and LLMNR chatter;
+- the **passive listener** (`passive.py`) sniffs while the ARP scan runs,
+  harvesting ARP, DHCP, mDNS, SSDP, and LLMNR chatter. The window is adaptive:
+  it stops once `PASSIVE.QUIET_PERIOD` seconds pass with no new announcement
+  (after a `PASSIVE.MIN_WINDOW` floor), or at the `PASSIVE.TIMEOUT` ceiling on
+  a network that keeps talking. The ARP burst itself is chatter the listener
+  sees, so a quiet LAN closes the window seconds after the scan;
 - **mDNS** (`resolvers/mdns.py`) starts a sniffer, then sends its multicast
   query from the sniffer's `started_callback`, and joins when the timeout
   expires;
@@ -453,7 +481,10 @@ scapy's `AsyncSniffer`, which runs its capture loop in a background thread:
 These are self-contained: each sniffer has its own capture handle and the
 parsing code filters packets by the expected source IP or query name. Because
 the passive listener is joined (`finish_passive_scan`) before the device pool
-starts, it does not overlap with the resolver probes.
+starts, it does not overlap with the resolver probes. However, the listener
+*does* overlap the broadcast prefetch's mDNS/SSDP sniffers, which is intended
+(and largely redundant — the listener also records the responses the prefetch
+elicits).
 
 `scapy`'s `srp` (the ARP scan) and `sr1` (router DNS, NetBIOS) also use their
 own sockets and, internally, a sender thread. They are called from resolver
@@ -469,21 +500,38 @@ All tuning lives in `constants.py`:
 | `NAME.MAX_DEVICE_WORKERS` | `4` | Devices resolved in parallel. |
 | `NAME.MAX_WORKERS` | `64` | Shared resolver-pool size. |
 | `NAME.DEFERRED_SOURCES` | `{"TLS certificate", "web title", "service banner"}` | Slow sources tried only if the fast tier is empty. |
+| `NAME.PREFETCH_WORKERS` | `2` | Threads for the scan-wide broadcast prefetch (mDNS vs SSDP). |
+| `PASSIVE.TIMEOUT` | `30.0` | Ceiling on the passive listening window. |
+| `PASSIVE.QUIET_PERIOD` | `3.0` | Silence after which the listener stops early. |
+| `PASSIVE.MIN_WINDOW` | `5.0` | Minimum listening time before early stop is allowed. |
+| `PASSIVE.POLL_INTERVAL` | `0.25` | How often the join loop checks for silence. |
+| `PASSIVE.MAX_FETCH_WORKERS` | `8` | Concurrent passively-learned SSDP description fetches. |
+| `SSDP.MAX_FETCH_WORKERS` | `8` | Concurrent SSDP description fetches during prefetch. |
 
 Sizing intuition: with `MAX_DEVICE_WORKERS = 4` and twelve sources, at most ~48
 tasks are live at once, so `MAX_WORKERS = 64` means a device's whole chain can
 start without queuing behind another device. If you add sources or raise the
 device worker count, revisit `MAX_WORKERS`.
 
+Every `NAME.*` and `PASSIVE.*` value in the table is environment-overridable
+(`LANTERN_NAME_*`, `LANTERN_PASSIVE_*`, plus `LANTERN_SSDP_MAX_FETCH_WORKERS`).
+Values are read once at import; a malformed or below-minimum value falls back to
+the default rather than raising. See [Configuration](../README.md#configuration)
+for the full list.
+
 ## Known limitations
 
 - **Early exit leaves running fast-tier probes to finish.** They cannot be
   cancelled, so the end-of-scan drain may wait a few seconds. The deferred tier
   is never started for an already-named device, which bounds the waste.
-- **`NAME.*` is not yet environment-overridable.**
 - **Theoretical multicast cross-talk.** Concurrent sniffers on UDP/5353 and
   UDP/1900 could see each other's packets; every resolver filters by responder
-  IP, and the scan-scoped prefetch removes most of the overlap.
+  IP, and the scan-scoped prefetch removes most of the overlap. The broadcast
+  prefetch now runs its sniffers at the same time as the passive listener.
+- **The adaptive passive window trades coverage for latency.** Stopping after a
+  quiet period can miss a device that would have announced only after several
+  seconds of silence. `PASSIVE.QUIET_PERIOD` (and `MIN_WINDOW`) is the dial;
+  raising it approaches the old fixed-window behavior.
 - **A hard `DEADLINE` can cut off a slow-but-valid answer.** It is a deliberate
   latency/coverage trade-off, tuned by the constant above.
 

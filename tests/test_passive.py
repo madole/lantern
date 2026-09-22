@@ -1,3 +1,5 @@
+import time
+
 from scapy.all import ARP, BOOTP, DHCP, DNS, DNSRR, IP, UDP, Raw
 
 import lantern.passive as passive
@@ -155,7 +157,7 @@ def test_resolve_passive_names_prefetches_ssdp_descriptions(monkeypatch):
     assert calls == ["http://192.168.1.5/d.xml"]
 
 
-def test_passive_scan_spins_until_finished(monkeypatch):
+def test_passive_scan_stops_early_once_quiet(monkeypatch):
     passive.reset_passive_cache()
     events = []
 
@@ -164,17 +166,27 @@ def test_passive_scan_spins_until_finished(monkeypatch):
             events.append("start")
 
         def stop(self):
-            events.append("stop")
+            events.append("spinner-stop")
 
     class FakeSniffer:
+        running = False
+
         def start(self):
             events.append("sniff")
+            self.running = True
 
-        def join(self):
+        def join(self, timeout=None):
             events.append("join")
+
+        def stop(self):
+            events.append("sniffer-stop")
+            self.running = False
 
     monkeypatch.setattr(passive, "yaspin", lambda **kwargs: FakeSpinner())
     monkeypatch.setattr(passive, "AsyncSniffer", lambda **kwargs: FakeSniffer())
+    monkeypatch.setattr(passive.PASSIVE, "MIN_WINDOW", 0, raising=False)
+    monkeypatch.setattr(passive.PASSIVE, "QUIET_PERIOD", 0, raising=False)
+    monkeypatch.setattr(passive.PASSIVE, "POLL_INTERVAL", 0, raising=False)
 
     sniffer = passive.start_passive_scan(timeout=5)
 
@@ -182,7 +194,35 @@ def test_passive_scan_spins_until_finished(monkeypatch):
 
     passive.finish_passive_scan(sniffer)
 
-    assert events == ["start", "sniff", "join", "stop"]
+    # A quiet wire closes the window instead of waiting out the sniffer timeout.
+    assert events == ["start", "sniff", "join", "sniffer-stop", "spinner-stop"]
+
+
+def test_passive_window_stays_open_while_wire_is_active(monkeypatch):
+    passive.reset_passive_cache()
+    monkeypatch.setattr(passive.PASSIVE, "MIN_WINDOW", 0, raising=False)
+    monkeypatch.setattr(passive.PASSIVE, "QUIET_PERIOD", 60, raising=False)
+
+    started = time.monotonic()
+    passive._listen_started = started
+    with passive._observation_lock:
+        passive._last_observation = started
+
+    assert passive._quiet_reached() is False
+
+    passive._note_observation()
+
+    assert passive._quiet_reached() is False
+
+
+def test_passive_window_closes_after_quiet_period(monkeypatch):
+    passive.reset_passive_cache()
+    monkeypatch.setattr(passive.PASSIVE, "MIN_WINDOW", 0, raising=False)
+    monkeypatch.setattr(passive.PASSIVE, "QUIET_PERIOD", 0, raising=False)
+
+    passive._listen_started = time.monotonic()
+
+    assert passive._quiet_reached() is True
 
 
 def test_passive_scan_stops_spinner_without_sniffer():

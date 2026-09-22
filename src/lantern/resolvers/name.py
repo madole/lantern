@@ -84,16 +84,70 @@ def shutdown_name_state():
         executor.shutdown(wait=True, cancel_futures=True)
 
 
-def prefetch_scan_names():
-    """Run the broadcast/multicast sources once for the whole scan.
+def prefetch_broadcast_names():
+    """Run the scan-wide broadcast lookups, overlapping the two multicasts.
 
     mDNS browsing and SSDP discovery answer for every host at once, so doing
-    them per device would repeat the same network round-trips N times.
+    them per device would repeat the same network round-trips N times. They use
+    different multicast groups and sockets, so they run concurrently. Neither
+    depends on the ARP results or the passive listener, which lets the caller
+    start this before the ARP scan and join it after the passive listener.
     """
-    logger.debug("Prefetching scan-scoped name sources")
-    browse_mdns_services()
+    logger.debug("Prefetching scan-scoped broadcast name sources")
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=NAME.PREFETCH_WORKERS, thread_name_prefix="prefetch"
+    ) as pool:
+        futures = (
+            pool.submit(browse_mdns_services),
+            pool.submit(_discover_and_resolve_ssdp),
+        )
+        for future in futures:
+            future.result()
+
+
+def _discover_and_resolve_ssdp():
+    """Discover SSDP responders, then fetch every description once."""
     discover_ssdp()
     resolve_ssdp_names()
+
+
+def _prefetch_broadcast_worker():
+    """Best-effort wrapper so a prefetch failure can never abort the scan."""
+    try:
+        prefetch_broadcast_names()
+    except Exception as error:
+        logger.opt(exception=error).warning("Scan-wide name prefetch failed: {}", error)
+
+
+def start_prefetch_broadcast():
+    """Start the scan-wide broadcast lookups in the background.
+
+    Returns the worker thread so the caller can join it with
+    :func:`finish_prefetch_broadcast` once the passive listener has stopped.
+    """
+    thread = threading.Thread(
+        target=_prefetch_broadcast_worker,
+        name="prefetch-broadcast",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def finish_prefetch_broadcast(thread=None):
+    """Wait for the scan-wide broadcast lookups started above to finish."""
+    if thread is not None:
+        thread.join()
+
+
+def prefetch_scan_names():
+    """Run every scan-scoped source once, synchronously.
+
+    Convenience for callers that are not overlapping the prefetch with the
+    passive window; ``scan_network`` uses the split broadcast/passive steps
+    instead so the multicasts can run while the listener is still going.
+    """
+    prefetch_broadcast_names()
     resolve_passive_names()
 
 
