@@ -13,10 +13,15 @@ dependencies = [
     "defusedxml>=0.7.1",
     "loguru>=0.7.3",
     "mac-vendor-lookup>=0.1.15",
+    "mcp[cli]>=2.2,<3",
     "scapy>=2.7.0",
     "tabulate>=0.10.0",
     "yaspin>=3.0.0",
 ]
+
+[project.scripts]
+lantern = "lantern.main:main"
+lantern-mcp = "lantern.mcp_server:main"
 
 [dependency-groups]
 dev = [
