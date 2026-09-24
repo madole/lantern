@@ -5,7 +5,43 @@ import tempfile
 
 from lantern.constants import TLS
 from lantern.logger import logger
+from lantern.metadata import record
 from lantern.sanitize import sanitize_name
+
+# Certificate fields recorded alongside the name: who signed it and when it
+# expires. Keys are metadata keys (first value per key wins per scan).
+_ORGANIZATION_NAME = "organizationName"
+_NOT_AFTER = "notAfter"
+_NOT_BEFORE = "notBefore"
+_TLS_ISSUER_KEY = "tls_issuer"
+_TLS_VALID_TO_KEY = "tls_valid_to"
+_TLS_VALID_FROM_KEY = "tls_valid_from"
+_TLS_SOURCE = "TLS"
+
+
+def _issuer_value(certificate, field):
+    """The named field from the certificate's issuer DN, or None."""
+    try:
+        for rdn in certificate.get("issuer", ()):
+            for key, value in rdn:
+                if key == field and value:
+                    return value
+    except Exception:
+        pass
+    return None
+
+
+def _record_certificate_metadata(certificate, ip_address):
+    """Remember the certificate's issuer and validity window, if decodable."""
+    if not certificate:
+        return
+
+    issuer = _issuer_value(certificate, TLS.COMMON_NAME) or _issuer_value(
+        certificate, _ORGANIZATION_NAME
+    )
+    record(ip_address, _TLS_ISSUER_KEY, issuer, _TLS_SOURCE)
+    record(ip_address, _TLS_VALID_TO_KEY, certificate.get(_NOT_AFTER), _TLS_SOURCE)
+    record(ip_address, _TLS_VALID_FROM_KEY, certificate.get(_NOT_BEFORE), _TLS_SOURCE)
 
 
 def _decode_certificate(der_certificate):
@@ -84,6 +120,7 @@ def get_tls_name(ip_address, timeout=TLS.TIMEOUT):
     logger.debug("Reading TLS certificate for IP: {}", ip_address)
     for port in TLS.PORTS:
         certificate = _fetch_certificate(ip_address, port, timeout)
+        _record_certificate_metadata(certificate, ip_address)
         for name in certificate_names(certificate):
             cleaned = clean_cert_name(name, ip_address)
             if cleaned:

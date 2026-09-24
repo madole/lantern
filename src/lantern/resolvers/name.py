@@ -4,6 +4,7 @@ import time
 
 from lantern.constants import FALLBACK, NAME
 from lantern.logger import logger
+from lantern.metadata import NAME_SOURCE, RESPONDED, record
 from lantern.passive import get_passive_name, resolve_passive_names
 from lantern.resolvers.banner import get_service_banner
 from lantern.resolvers.hostname import get_hostname
@@ -173,6 +174,22 @@ def _highest_priority_success(successes, futures, pending):
     return successes[best_priority]
 
 
+def _record_responded(ip_address, successes):
+    """Remember which name sources answered for a device.
+
+    Best-effort: the chain exits as soon as the highest-priority running source
+    is decided, so this is the set that completed before that point, not every
+    source on the network. The winning source is recorded separately.
+    """
+    if not successes:
+        return
+    try:
+        sources = [successes[priority][0] for priority in sorted(successes)]
+        record(ip_address, RESPONDED, "; ".join(sources), "name")
+    except Exception as error:
+        logger.trace("Could not record responded sources for {}: {}", ip_address, error)
+
+
 def _run_sources(executor, ip_address, device, sources, deadline):
     """Run one tier of sources concurrently until one wins or time runs out.
 
@@ -224,11 +241,16 @@ def _run_sources(executor, ip_address, device, sources, deadline):
                 logger.debug("{} found no name for {}", source, ip_address)
 
         winner = _highest_priority_success(successes, futures, pending)
-        if winner is not None:
+        # Early exit is the default: once no still-running source can outrank
+        # the best result, stop. FULL_MATRIX keeps waiting so every source that
+        # answers is recorded, trading scan time for a complete protocol matrix.
+        if not NAME.FULL_MATRIX and winner is not None:
             for future in pending:
                 future.cancel()
+            _record_responded(ip_address, successes)
             return winner
 
+    _record_responded(ip_address, successes)
     return successes[min(successes)] if successes else None
 
 
@@ -264,6 +286,7 @@ def resolve_name(ip_address, device=None):
         winner = _run_sources(executor, ip_address, device, sources, deadline)
         if winner is not None:
             source, name = winner
+            record(ip_address, NAME_SOURCE, source, "name")
             logger.debug("Using {} result for {}", source, ip_address)
             return name
 

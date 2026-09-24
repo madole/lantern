@@ -317,6 +317,15 @@ what makes the concurrency both fast and correct — a fast low-priority answer
 never preempts a slow high-priority one, but once the highest-priority pending
 source has resolved, the rest are cancelled.
 
+**Opt-in full matrix.** Setting `LANTERN_FULL_MATRIX=1` (read as
+`NAME.FULL_MATRIX`) skips that early-exit check: `_run_sources` keeps waiting
+for every source in the tier, cancellations never happen, and `responded`
+records the complete set of protocols that answered. The tier's priority rule
+still decides the winning name, and the shared `DEADLINE` still caps the wait —
+so the mode trades scan time for matrix coverage, not correctness. It is off by
+default, and it does not change the tier gating: the deferred tier still only
+runs when the fast tier finds no name.
+
 ```mermaid
 sequenceDiagram
     participant R as resolve_name
@@ -378,11 +387,20 @@ earlier logs showed.
 time; others block in `acquire()` until it is released. The `with lock:` form
 releases it even if an exception is raised.
 
-In this codebase a lock guards exactly one thing: the resolver-pool singleton
-(`_executor`). There is no other shared mutable state between threads, by
-design. Per-device state (`successes`, `futures`, `pending`) is local to the
+In this codebase there are exactly two locks: the resolver-pool singleton
+(`_executor`) and the per-scan metadata store (`metadata._lock`, see below).
+Per-device state (`successes`, `futures`, `pending`) is local to the
 device worker's stack, and the prefetch caches are written before the device
 pool starts and then only read.
+
+The **metadata store** (`metadata.py`) is the one piece of shared state that
+*is* written while the device pool runs: resolver workers record facts (model,
+OS, serial, ...) concurrently, and `scan_network` reads them back only after
+`shutdown_name_state` drains the pool. Its `_lock` guards the `_facts` dict and
+is held only for the dictionary operations — no network I/O runs under it — and
+`record` sanitizes values before storing so a fact can never reach the report
+unsanitized. Facts are first-wins per key, so a later response cannot overwrite
+an earlier one.
 
 ### Semaphores (and the one we removed)
 

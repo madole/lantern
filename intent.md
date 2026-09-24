@@ -104,7 +104,8 @@ Ordered roughly by expected payoff versus effort.
 
 ## Future considerations
 
-Follow-ups beyond the name-source work; A and D are done, B-C remain.
+Follow-ups beyond the name-source work; A, C, D, and I are done, B/E/F are
+partly shipped, and G-H remain.
 
 ### A. Concurrency and a per-device time budget — DONE
 
@@ -165,28 +166,40 @@ leaves already-running fast-tier lookups to finish (the drain absorbs them), but
 the slow TLS/web tier is never started for a device that the fast tier already
 named.
 
-### B. Source and confidence reporting
+### B. Source and confidence reporting — PARTLY DONE (source, no confidence)
 
-- Return a structured result from `resolve_name` (`name`, `source`) instead of a
-  bare string, and update `main.py` and tests accordingly.
-- Add a per-source confidence table in `constants.py` (e.g. passive
-  self-announcement and router DNS high; reverse DNS/mDNS medium; SSDP
-  `friendlyName` medium; TLS CN and web `<title>` low). Vendor confidence should
-  distinguish an OUI hit from a locally administered/unknown MAC
-  (`is_locally_administered`).
-- Surface it: add `Source` and `Confidence` to `TABLE.HEADERS`, and log the
-  winning source alongside the name. Keep the full per-source attempt log at
-  debug level for auditing rather than bloating the table.
+What shipped: `resolve_name` records the winning label as `name_source` and the
+set of sources that answered before the early exit as `responded`, both through
+`metadata.record`, so they appear in the `Details` column and feed the summary.
+The name chain itself is unchanged — no confidence weighting yet.
+
+Still open:
+
+- Apply a per-source confidence table (e.g. passive self-announcement and router
+  DNS high; reverse DNS/mDNS medium; SSDP `friendlyName` medium; TLS CN and web
+  `<title>` low), and distinguish an OUI hit from a locally administered/unknown
+  MAC (`is_locally_administered`) as its own confidence signal.
 - Never let a low-confidence source override a higher-confidence one, even if it
-  resolves first.
+  resolves first. (Today priority order alone decides.)
+- Optionally surface a dedicated `Source`/`Confidence` column; `name_source` in
+  the details column already exposes the winner.
 
-### C. Metadata capture
+### C. Metadata capture — DONE (name-source confidence, B, still open)
 
-The SSDP parser already reads `friendlyName`, `modelName`, and `manufacturer`
-but collapses them to one string (`ssdp.py:34`). Return a record so `model` and
-`manufacturer` can fill optional columns even when the name came from another
-source, and carry the same source/confidence treatment from B. Feeds the goal's
-"model, services, OS hints" without forcing a name.
+Shipped as a per-scan, lock-guarded fact store in `metadata.py`:
+
+- `record(ip, key, value, source)` stores one fact per key (first value wins)
+  and sanitizes at the boundary; `get_metadata(ip)` reads them back. The store
+  is reset per scan and touched only through this module.
+- `main.py` reads it *after* `shutdown_name_state` (the drain) and renders a
+  `Details` column, so a fact a slow source records still reaches the table.
+- Canonical keys (`model`, `os`, `version`, `serial`, `device_type`, ...) let
+  two protocols fill one column instead of inventing parallel ones.
+- Every fact keeps its `source` for auditing; the per-source *confidence*
+  treatment of B is not implemented yet.
+
+The SSDP parser still collapses its name fields to one string, but now also
+exposes the full set (see E).
 
 ### D. Read-only and LAN-scoped guardrails — DONE
 
@@ -220,4 +233,173 @@ What shipped:
 Concurrency was already bounded (`NAME.MAX_DEVICE_WORKERS`, `NAME.MAX_WORKERS`)
 and there are no retry loops, so probes cannot flood the segment. The explicit
 `8.8.8.8` use remains local-IP detection only and sends no packet.
+
+### E. Fields already on the wire, currently discarded — PARTLY DONE
+
+Every name source fetches a payload that carries more than the one value the
+chain keeps. Surfacing the rest needs no additional network traffic — only
+extraction work in code that is already receiving the bytes. Ordered roughly by
+payoff; the first three overlap C.
+
+What shipped (all via `metadata.record`, no new probes, no new round-trips):
+
+- **DHCP** (`passive.py`): options 60 (vendor class), 55 (parameter-request
+  fingerprint), 81 (client FQDN), and 61 (client id). The hostname return value
+  is unchanged; metadata is recorded even when option 12 is absent.
+- **SSDP** (`resolvers/ssdp.py`): response `SERVER`/`ST`/`USN` headers
+  (`server`, `device_type`, `uuid`) recorded for in-scope responders, plus the
+  description's `deviceType`/`UDN`/`serialNumber`/`modelName`/`manufacturer`/
+  `modelNumber`. `_ssdp_search` and `get_ssdp_description` keep their existing
+  contracts so the monkeypatched tests still hold.
+- **SNMP** (`resolvers/snmp.py`): the one read-only GET now also asks for
+  `sysDescr`, `sysObjectID`, `sysUpTime`, `sysContact`, and `sysLocation`, and
+  records `sys_descr`/`sys_object_id`/`contact`/`location`/`uptime`
+  (`sysDescr` is kept even when `sysName` supplies the name).
+- **mDNS** (`resolvers/mdns.py`): TXT `model`/`os`/`version`/`deviceid` and the
+  set of SRV service types (`services`) from the one browse pass.
+- **HTTP/TLS** (`resolvers/{web,tls}.py`): the `Server` header (and an auth
+  realm when present), and the certificate issuer/validity window. This also
+  resolves the drift noted below — item 6 claimed the `Server` header was
+  collected; it now is.
+- **MAC randomization** (`main.py`): a locally administered MAC records
+  `randomized_mac`.
+- **Open-service inventory** (`resolvers/ports.py`, called once per device from
+  `main.py`): a bounded, read-only TCP connect probe of `PORTS.CANDIDATES`
+  records `open_ports`, independent of the name chain. This is the one item here
+  that adds a probe rather than reusing one; it is LAN-scoped and
+  concurrency-bounded, and it also feeds the summary (F).
+
+Everything in this section is now shipped; the only field deliberately left
+uncaptured is the redirect `Location` header.
+
+- **SSDP response headers.** `parse_ssdp_location` (`resolvers/ssdp.py`) and the
+  passive `parse_ssdp` (`passive.py`) read only `LOCATION` out of the M-SEARCH
+  response. The same datagram carries `SERVER:` (the OS/UPnP stack, e.g.
+  `Linux/3.14 UPnP/1.0 ...`), `ST:` (`urn:...:device:MediaRenderer:1`, a device
+  class), and `USN:` (stable identity). Capture them as device-class and
+  platform hints, and use `USN` as a cross-scan identity anchor (see G).
+- **UPnP description internals.** `parse_ssdp_description` (`ssdp.py`) already
+  iterates every element but keeps only `friendlyName`/`modelName`/
+  `manufacturer`. `deviceType`, `UDN`, `serialNumber`, `modelNumber`, and the
+  `serviceList` are in the same document; capture them to fill model/serial
+  columns and a stable UUID.
+- **SNMP `sysDescr` as metadata.** `SNMP.NAME_OIDS` already fetches both
+  `sysName` and `sysDescr` in one GET, but `get_snmp_name` (`snmp.py`) only
+  consults `sysDescr` when `sysName` is empty, discarding the model/OS/firmware
+  text whenever a name was found. Keep `sysDescr` as metadata regardless, and
+  extend the same query with `sysObjectID` (vendor device type), `sysUpTime`
+  (recent reboot?), and `sysContact`/`sysLocation`.
+- **DHCP options beyond the hostname.** `parse_dhcp` (`passive.py`) keeps only
+  option 12 (hostname). The packets it already sniffs also carry option 60
+  (vendor class: `MSFT 5.0`, `android-dhcp-13`, `dhcpcd-...`), option 55
+  (parameter request list, a classic OS fingerprint), option 81 (client FQDN,
+  usually the real machine name and domain), and option 61 (client id). This is
+  one of the highest-yield, zero-cost fingerprints available.
+- **mDNS SRV/TXT records.** `browse_mdns_services` (`mdns.py`) keeps only PTR
+  answers. The same DNS-SD response bundles SRV (host + port, i.e. which service
+  runs where) and TXT (`model=`, `os=`, `ver=`, feature flags). AirPlay, Cast,
+  and printers hand over model and OS version in TXT for free.
+- **HTTP and TLS response metadata.** `get_web_title` (`web.py`) now records
+  the `Server` header and a `WWW-Authenticate` realm from the response it
+  already reads (a redirect `Location` is still not captured). This also fixes
+  the drift in item 6, which claimed the `Server` header was collected when it
+  was not. `certificate_names` (`tls.py`) still keeps only DNS SANs and the CN,
+  but the issuer and validity window are now recorded as metadata (signed vs.
+  self-signed, firmware age, vendor).
+- **Open-service inventory.** Implemented as a dedicated probe
+  (`resolvers/ports.py`) rather than reusing the banner/web ports, so it runs
+  for every device even when the name chain never reaches those sources.
+  `open_ports` yields a per-device exposed-port map; an open telnet (23) or SMB
+  (445) is a security signal, not just a name candidate.
+- **MAC randomization.** `is_locally_administered` (`vendor.py`) is already
+  computed but collapsed to `"Unknown Vendor"`. A locally administered MAC
+  signals a privacy-randomized endpoint (phone/laptop) or a VM and is useful on
+  its own.
+
+### F. Aggregate and cross-device insights — PARTLY DONE
+
+What shipped in `summary.py` (pure, no I/O; `main.py` logs the lines after the
+table):
+
+- **IP↔MAC cardinality.** `main.py` now keeps every `(ip, mac, source)`
+  observation from the ARP scan and the passive listener, and `summarize`
+  reports an IP seen with multiple MACs and a MAC seen on multiple IPs.
+- **Fleet composition and device class.** `classify` infers one label per device
+  (virtual machine, printer, windows host, unix host, apple/consumer,
+  media/iot, iot, unknown) from open ports, `name_source`, `services`, and
+  vendor; `summarize` tallies vendors and classes.
+- **Security posture.** Risky open ports (`PORTS.RISKY`) and a device that
+  answered SNMP under the default `public` community are reported per device.
+- **Randomized-MAC count** and named/unknown counts.
+
+Still open: the complete protocol-response matrix is now an opt-in rather than
+the default. `LANTERN_FULL_MATRIX=1` disables the early exit so every source in
+a tier runs to completion and `responded` records the full set; it is off by
+default and still bounded by `NAME.DEADLINE`. The deferred tier still only runs
+when the fast tier finds no name, so the matrix covers the tier that ran.
+
+Original notes:
+
+- **IP↔MAC cardinality.** The passive and merged caches are first-write-wins
+  (`passive.py`, `main.py`), so two MACs on one IP (address conflict or roaming)
+  and one MAC on several IPs (multi-homed/aliased) are silently discarded. Flag
+  both as network-health findings.
+- **Protocol-response matrix as a signature.** *Which* sources answered is
+  itself a fingerprint: NetBIOS + LLMNR + SMB implies Windows; mDNS/AirPlay/Cast
+  implies Apple or consumer gear; SNMP implies managed equipment; router DNS
+  only implies a headless DHCP client; a web title only implies an appliance.
+  This is B's source data reused for device-class inference, not just confidence.
+- **Fleet composition.** A vendor histogram, VM/container detection from the OUI
+  (VMware/QEMU/VirtualBox), and a randomized-MAC count characterize the network
+  as a whole.
+- **Security posture.** The same data flags an SNMP agent answering the default
+  `public` community, an open telnet port, an unauthenticated web admin page, or
+  a self-signed certificate.
+
+### G. Persistence across scans
+
+Nothing is stored between scans today — `scan_network` returns a transient list.
+Persisting the (MAC, UDN, name, vendor, metadata) records would unlock the
+highest-value insight of all: new, vanished, and moved devices, i.e. rogue-
+device detection and IP-churn tracking anchored on a stable identifier.
+
+### H. Coverage gap: IPv6
+
+The passive parsers and multicast resolvers require `haslayer(IP)` (`passive.py`,
+`mdns.py`), so IPv6-only devices and NDP/DHCPv6 traffic are invisible. Worth
+scoping separately if the LAN carries IPv6.
+
+### I. MCP server — DONE
+
+`mcp_server.py` exposes the scan to AI hosts over MCP stdio, so a model can run
+a scan and add its own insight to the results. `main.py` was split into a
+presentation-free core (`run_scan`, returning devices, observations and the
+`summary` as one JSON-serializable dict) and the existing CLI wrapper, so the
+CLI and the server share one scan implementation. Two tools: `network_info`
+(local IP/subnet) and `scan(ip_range?)` (the JSON result). The CLI also gained
+`--json` and `--range`. The server must run as root, since the scan needs raw
+sockets.
+
+### J. Service-type discovery, appliance hint, and class inference — DONE
+
+A live scan of a real LAN surfaced four gaps, all closed without new probes:
+
+- **Dynamic mDNS service-type discovery.** `browse_mdns_services` already sent
+  the `_services._dns-sd._udp.local` meta-query but discarded its answers. The
+  meta-query reply enumerates every service type the LAN advertises, so those
+  answers now drive a second browse pass for any type not in the static list
+  (capped by `MDNS.MAX_DISCOVERED_TYPES`). This is how MAC-derived names such as
+  Google Nearby's `_FC9F5ED42C8A._tcp` are found at all, and it removes the need
+  to hardcode every stack.
+- **New static types.** `_miio._udp` (Xiaomi/Yeelight), `_hap._tcp` (HomeKit),
+  and `_dkapi._tcp` (Daikin) join the list, and `_udp` services are now covered.
+- **Service-aware classification.** `summary.classify` no longer treats any
+  `services` value as `apple/consumer`; it maps known types to a family
+  (HomeKit/Xiaomi/Daikin → `iot`, Cast/Spotify → `media/iot`,
+  AirPlay/Companion-Link → `apple/consumer`) and checks them before the coarser
+  name-source fallbacks.
+- **Embedded-appliance fingerprint.** A web server that answers but presents no
+  `Server` header and no usable title is recorded as `appliance` (metadata) and
+  classified as `appliance`, so a bare embedded stack is no longer `unknown`.
+
 

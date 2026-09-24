@@ -2,6 +2,7 @@ from scapy.all import DNS, DNSQR, IP, UDP, AsyncSniffer, Ether, sendp
 
 from lantern.constants import ENCODING, MDNS
 from lantern.logger import logger
+from lantern.metadata import MODEL, OS, SERIAL, SERVICES, VERSION, record
 from lantern.resolvers.dns_common import dns_answers, ptr_name, reverse_arpa
 from lantern.sanitize import sanitize_name
 
@@ -90,6 +91,141 @@ def _mdns_instance_name(answer):
     return sanitize_name(instance.rstrip("."))
 
 
+# TXT keys mDNS responders advertise, mapped to the canonical fact they name.
+_TXT_KEY_TO_METADATA = {
+    "model": MODEL,
+    "am": MODEL,
+    "md": MODEL,
+    "os": OS,
+    "osvers": OS,
+    "ver": VERSION,
+    "version": VERSION,
+    "deviceid": SERIAL,
+}
+
+
+def _txt_chunks(rdata):
+    """Split length-prefixed TXT rdata into its strings; [] if malformed."""
+    chunks = []
+    offset = 0
+    while offset < len(rdata):
+        length = rdata[offset]
+        offset += 1
+        if offset + length > len(rdata):
+            return []
+        chunks.append(rdata[offset : offset + length])
+        offset += length
+    return chunks
+
+
+def _txt_pairs(rdata):
+    """Parse TXT record data into ``(key, value)`` pairs; malformed yields [].
+
+    On the wire TXT is a sequence of length-prefixed strings, but scapy may
+    hand us the raw blob, a list of already-unpacked strings, or a plain
+    string, so every shape is handled defensively.
+    """
+    if isinstance(rdata, bytes):
+        chunks = _txt_chunks(rdata)
+    elif isinstance(rdata, (list, tuple)):
+        chunks = []
+        for item in rdata:
+            if isinstance(item, bytes):
+                parsed = _txt_chunks(item)
+                chunks.extend(parsed if parsed else [item])
+            elif isinstance(item, str):
+                chunks.append(item)
+            else:
+                return []
+    elif isinstance(rdata, str):
+        chunks = rdata.split("\x00")
+    else:
+        return []
+
+    pairs = []
+    for chunk in chunks:
+        text = chunk if isinstance(chunk, str) else chunk.decode(ENCODING, "replace")
+        key, sep, value = text.partition("=")
+        if sep and key:
+            pairs.append((key, value))
+    return pairs
+
+
+def _service_type(rrname):
+    """Extract the service type ("_airplay._tcp") from a record name, or None."""
+    if isinstance(rrname, bytes):
+        try:
+            rrname = rrname.decode(ENCODING)
+        except UnicodeDecodeError:
+            return None
+    if not isinstance(rrname, str):
+        return None
+
+    labels = rrname.rstrip(".").split(".")
+    if not labels or labels[-1].lower() != "local":
+        return None
+    for index, label in enumerate(labels[:-1]):
+        if label.lower() not in ("_tcp", "_udp"):
+            continue
+        if index == 0:
+            return None
+        return ".".join(labels[index - 1 : -1])
+    return None
+
+
+def _discovered_service_types(responses):
+    """Service types named by the meta-query (`_services._dns-sd._udp.local`).
+
+    The meta-query answers are PTR records whose owner name is the browse
+    service and whose rdata is a service type (`_miio._udp.local`). Those are
+    the types the LAN actually advertises, so they let the browse cover devices
+    whose type is not in the static list without hardcoding every one.
+    """
+    discovered = set()
+    for reply in responses:
+        for answer in dns_answers(reply):
+            if getattr(answer, "type", None) != MDNS.PTR_TYPE:
+                continue
+            rrname = getattr(answer, "rrname", None)
+            if isinstance(rrname, bytes):
+                try:
+                    rrname = rrname.decode(ENCODING)
+                except UnicodeDecodeError:
+                    continue
+            if not isinstance(rrname, str) or rrname.rstrip(".") != MDNS.SERVICE_BROWSE:
+                continue
+            service = _full_service_type(getattr(answer, "rdata", None))
+            if service:
+                discovered.add(service)
+    return discovered
+
+
+def _full_service_type(rdata):
+    """Decode a meta-query rdata into a full ``_x._tcp.local`` name, or None."""
+    if isinstance(rdata, bytes):
+        try:
+            rdata = rdata.decode(ENCODING)
+        except UnicodeDecodeError:
+            return None
+    if not isinstance(rdata, str):
+        return None
+    name = rdata.rstrip(".")
+    if not name.endswith(".local") or _service_type(name) is None:
+        return None
+    return name
+
+
+def _record_txt_metadata(ip_address, rdata):
+    """Record model/OS/version/serial facts from a service's TXT record."""
+    try:
+        for key, value in _txt_pairs(rdata):
+            fact = _TXT_KEY_TO_METADATA.get(key.lower())
+            if fact:
+                record(ip_address, fact, value, "mDNS")
+    except Exception:
+        logger.debug("Ignoring malformed mDNS TXT record from {}", ip_address)
+
+
 _mdns_service_cache = None
 
 
@@ -109,11 +245,38 @@ def browse_mdns_services(timeout=MDNS.BROWSE_TIMEOUT):
     qnames = [MDNS.SERVICE_BROWSE, *MDNS.SERVICE_TYPES]
     responses = _mdns_query(qnames, timeout)
 
+    # The meta-query answer tells us which types this LAN advertises; browse
+    # any we did not already ask for in a second pass, so new or unusual stacks
+    # are discovered instead of being missed by a hardcoded list.
+    known = {service.lower() for service in MDNS.SERVICE_TYPES}
+    extra = sorted(
+        service
+        for service in _discovered_service_types(responses)
+        if service.lower() not in known
+    )[: MDNS.MAX_DISCOVERED_TYPES]
+    if extra:
+        logger.debug("Browsing {} extra mDNS service type(s): {}", len(extra), extra)
+        responses = [*responses, *_mdns_query(extra, timeout)]
+
     services = {}
+    service_types = {}
     for reply in responses:
         ip = reply[IP].src
         for answer in dns_answers(reply):
-            if getattr(answer, "type", None) != MDNS.PTR_TYPE:
+            answer_type = getattr(answer, "type", None)
+            if answer_type == MDNS.TXT_TYPE:
+                _record_txt_metadata(ip, getattr(answer, "rdata", None))
+                continue
+
+            if answer_type == MDNS.SRV_TYPE:
+                service = _service_type(getattr(answer, "rrname", None))
+                if service:
+                    seen = service_types.setdefault(ip, [])
+                    if service not in seen:
+                        seen.append(service)
+                continue
+
+            if answer_type != MDNS.PTR_TYPE:
                 continue
 
             service = getattr(answer, "rrname", b"")
@@ -126,6 +289,10 @@ def browse_mdns_services(timeout=MDNS.BROWSE_TIMEOUT):
             name = _mdns_instance_name(answer)
             if name and ip not in services:
                 services[ip] = name
+
+    for ip, types in service_types.items():
+        if types:
+            record(ip, SERVICES, "; ".join(types), "mDNS")
 
     logger.debug("mDNS browse identified {} device(s)", len(services))
     _mdns_service_cache = services

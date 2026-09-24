@@ -79,6 +79,13 @@ class SNMP:
     SYS_NAME = "1.3.6.1.2.1.1.5.0"
     SYS_DESCR = "1.3.6.1.2.1.1.1.0"
     NAME_OIDS = (SYS_NAME, SYS_DESCR)
+    # Extra scalars fetched in the same GET for metadata: vendor device type,
+    # uptime (TimeTicks), administrative contact, and physical location.
+    SYS_OBJECT_ID = "1.3.6.1.2.1.1.2.0"
+    SYS_UPTIME = "1.3.6.1.2.1.1.3.0"
+    SYS_CONTACT = "1.3.6.1.2.1.1.4.0"
+    SYS_LOCATION = "1.3.6.1.2.1.1.6.0"
+    METADATA_OIDS = (SYS_OBJECT_ID, SYS_UPTIME, SYS_CONTACT, SYS_LOCATION)
     MAX_NAME_LENGTH = 60
 
 
@@ -95,9 +102,27 @@ class MDNS:
     DNS_RESPONSE = 1
     PTR_RECORD = "PTR"
     PTR_TYPE = 12
+    # DNS-SD also carries SRV (host/port) and TXT (device metadata) records.
+    SRV_RECORD = "SRV"
+    SRV_TYPE = 33
+    TXT_RECORD = "TXT"
+    TXT_TYPE = 16
+    # TXT keys that name a device's model/OS/version (AirPlay, Cast, printers).
+    TXT_METADATA_KEYS = (
+        "model",
+        "am",
+        "md",
+        "os",
+        "osvers",
+        "ver",
+        "version",
+        "deviceid",
+    )
     REVERSE_SUFFIX = ".in-addr.arpa"
     # Service browsing: the meta-query lists service types, the rest are
-    # common instance-bearing service types to map names back to IPs.
+    # common instance-bearing service types to map names back to IPs. The
+    # meta-query answers are used to browse any advertised type not listed
+    # here, so this list only needs the types worth querying up front.
     SERVICE_BROWSE = "_services._dns-sd._udp.local"
     SERVICE_TYPES = (
         "_http._tcp.local",
@@ -115,7 +140,15 @@ class MDNS:
         "_ssh._tcp.local",
         "_companion-link._tcp.local",
         "_device-info._tcp.local",
+        # Smart-home and appliance stacks seen in the wild: Xiaomi/Yeelight,
+        # HomeKit Accessory Protocol, and the Daikin API.
+        "_miio._udp.local",
+        "_hap._tcp.local",
+        "_dkapi._tcp.local",
     )
+    # Cap on the extra service types discovered from the meta-query and browsed
+    # in a second pass, so a noisy responder cannot turn the browse into a flood.
+    MAX_DISCOVERED_TYPES = 24
 
 
 class LLMNR:
@@ -169,6 +202,12 @@ class PASSIVE:
     )
     LLMNR_PORT = 5355
     DHCP_HOSTNAME_OPTIONS = ("hostname", 12)
+    # Metadata options in the same DHCP traffic: vendor class, parameter
+    # request list (OS fingerprint), client FQDN, and client identifier.
+    DHCP_VENDOR_CLASS_OPTIONS = ("vendor_class_id", 60)
+    DHCP_PARAM_REQUEST_OPTIONS = ("param_req_list", 55)
+    DHCP_CLIENT_FQDN_OPTIONS = ("client_FQDN", 81)
+    DHCP_CLIENT_ID_OPTIONS = ("client_id", 61)
 
 
 class NAME:
@@ -178,6 +217,7 @@ class NAME:
     MAX_DEVICE_WORKERS_ENV = "LANTERN_NAME_MAX_DEVICE_WORKERS"
     MAX_WORKERS_ENV = "LANTERN_NAME_MAX_WORKERS"
     PREFETCH_WORKERS_ENV = "LANTERN_NAME_PREFETCH_WORKERS"
+    FULL_MATRIX_ENV = "LANTERN_FULL_MATRIX"
 
     # Total wall-clock budget for one device's device-scoped name lookups.
     DEADLINE = _env_float(DEADLINE_ENV, 10.0, minimum=0.0)
@@ -191,6 +231,11 @@ class NAME:
     PREFETCH_WORKERS = _env_int(PREFETCH_WORKERS_ENV, 2, minimum=1)
     # Slow, low-yield sources only tried when every faster source came up empty.
     DEFERRED_SOURCES = frozenset({"TLS certificate", "web title", "service banner"})
+    # Opt-in: keep waiting for every source in a tier instead of exiting as soon
+    # as the highest-priority winner is decided. This records the complete
+    # protocol matrix in `responded` at the cost of running the whole tier, still
+    # bounded by DEADLINE. Off by default so a quick name stays quick.
+    FULL_MATRIX = _env_flag(FULL_MATRIX_ENV)
 
 
 class SSDP:
@@ -211,11 +256,27 @@ class SSDP:
     MAN = "ssdp:discover"
     MX = 1
     LOCATION_HEADER = "location:"
+    # Other headers in the M-SEARCH reply: OS/UPnP stack, search target (device
+    # class), and the device's stable unique service name.
+    SERVER_HEADER = "server:"
+    ST_HEADER = "st:"
+    USN_HEADER = "usn:"
+    RESPONSE_HEADERS = (SERVER_HEADER, ST_HEADER, USN_HEADER)
     # A description URL is attacker-controlled: only fetch plain HTTP(S) so a
     # responder cannot point us at file:// or another local scheme.
     ALLOWED_SCHEMES = ("http", "https")
     # Preferred order for picking a human-meaningful name from a description.
     NAME_FIELDS = ("friendlyname", "modelname", "manufacturer")
+    # Additional description elements kept as metadata (device class, stable
+    # UUID, serial/model numbers, maker) even when the name came from elsewhere.
+    METADATA_FIELDS = (
+        "devicetype",
+        "udn",
+        "serialnumber",
+        "modelnumber",
+        "manufacturer",
+        "modelname",
+    )
 
 
 class WEB:
@@ -232,6 +293,8 @@ class WEB:
     )
     USER_AGENT_HEADER = "User-Agent"
     USER_AGENT = "Mozilla/5.0"
+    # Response header naming the server software/version (a free OS hint).
+    SERVER_HEADER = "Server"
     MAX_BYTES = 65536
     HTML_PARSER = "html.parser"
     TITLE_TAG = "title"
@@ -292,8 +355,73 @@ class TLS:
     VERIFY = _env_flag(VERIFY_ENV)
 
 
+class PORTS:
+    # Read-only TCP connect probe of common service ports. Which ports answer
+    # is a per-device service inventory, independent of whether a name was
+    # found. Kept small and bounded so it cannot flood the segment.
+    CANDIDATES = (
+        21,  # ftp
+        22,  # ssh
+        23,  # telnet
+        25,  # smtp
+        53,  # dns
+        80,  # http
+        110,  # pop3
+        139,  # netbios
+        143,  # imap
+        443,  # https
+        445,  # smb
+        631,  # ipp
+        3389,  # rdp
+        8080,  # http-alt
+        8443,  # https-alt
+        9100,  # raw print
+    )
+    # Per-connect budget for a port that is filtered rather than closed.
+    TIMEOUT = 0.4
+    # Connect attempts run concurrently, at most this many per device.
+    MAX_WORKERS = 8
+    # Ports whose exposure is itself a security signal (used by the summary).
+    RISKY = {
+        21: "ftp",
+        23: "telnet",
+        139: "netbios",
+        445: "smb",
+        3389: "rdp",
+    }
+    # Ports that indicate a printer when open (used by the summary).
+    PRINTER = (515, 631, 9100)
+
+
+class METADATA:
+    # How the per-device facts are rendered in the results table.
+    SEPARATOR = ", "
+    MAX_DISPLAY = 80
+    # Preferred order for the details column; unlisted keys follow alphabetically.
+    DISPLAY_ORDER = (
+        "device_type",
+        "appliance",
+        "model",
+        "manufacturer",
+        "os",
+        "version",
+        "serial",
+        "server",
+        "services",
+        "open_ports",
+        "fqdn",
+        "vendor_class",
+        "dhcp_fingerprint",
+        "uptime",
+        "uuid",
+        "name_source",
+        "responded",
+        "randomized_mac",
+    )
+
+
 class TABLE:
-    HEADERS = ("IP", "MAC", "Name", "Vendor")
+    HEADERS = ("IP", "MAC", "Name", "Vendor", "Details")
     FORMAT = "grid"
 
 

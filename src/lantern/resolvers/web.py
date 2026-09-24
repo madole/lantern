@@ -7,8 +7,16 @@ from bs4 import BeautifulSoup
 
 from lantern.constants import WEB
 from lantern.logger import logger
+from lantern.metadata import APPLIANCE, SERVER, record
 from lantern.sanitize import sanitize_name
 from lantern.scope import is_in_scope
+
+# Response headers/keys kept beyond the title: the server software banner and,
+# when the page requires auth, the realm it advertises.
+_AUTHENTICATE_HEADER = "WWW-Authenticate"
+_REALM_PREFIX = "realm="
+_REALM_KEY = "realm"
+_SOURCE = "web"
 
 
 def is_generic_title(title):
@@ -38,9 +46,50 @@ def _final_url_in_scope(response, ip_address):
     return host == ip_address or is_in_scope(host)
 
 
+def _realm_from_authenticate(value):
+    """The realm named in a ``WWW-Authenticate`` header value, or None."""
+    if not value:
+        return None
+    index = value.lower().find(_REALM_PREFIX)
+    if index < 0:
+        return None
+    realm = value[index + len(_REALM_PREFIX) :].strip().strip('"').strip()
+    return realm or None
+
+
+def _record_response_metadata(response, ip_address):
+    """Remember what the response headers say about the device.
+
+    Best effort: test doubles (and odd responses) may carry no headers at all.
+    ``record`` sanitizes and keeps only the first value per key, so a later
+    candidate port never overwrites an earlier answer. Returns whether a
+    ``Server`` header was present, which the caller uses to spot a bare
+    embedded stack.
+    """
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return False
+    saw_server = False
+    try:
+        server = headers.get(WEB.SERVER_HEADER)
+        record(ip_address, SERVER, server, _SOURCE)
+        saw_server = bool(server)
+        record(
+            ip_address,
+            _REALM_KEY,
+            _realm_from_authenticate(headers.get(_AUTHENTICATE_HEADER)),
+            _SOURCE,
+        )
+    except Exception as error:
+        logger.trace("Could not read web headers from {}: {}", ip_address, error)
+    return saw_server
+
+
 def get_web_title(ip_address, timeout=WEB.TIMEOUT):
     """Load the device's built-in web page and use its <title> as a name."""
     logger.debug("Fetching web title for IP: {}", ip_address)
+    saw_response = False
+    saw_server = False
     for scheme, port in WEB.CANDIDATES:
         request = urllib.request.Request(
             f"{scheme}://{ip_address}:{port}",
@@ -64,6 +113,9 @@ def get_web_title(ip_address, timeout=WEB.TIMEOUT):
                     ip_address,
                 )
                 continue
+            saw_response = True
+            if _record_response_metadata(response, ip_address):
+                saw_server = True
             soup = BeautifulSoup(response.read(WEB.MAX_BYTES), WEB.HTML_PARSER)
             title_tag = soup.find(WEB.TITLE_TAG)
             title = sanitize_name(title_tag.text) if title_tag else None
@@ -82,4 +134,10 @@ def get_web_title(ip_address, timeout=WEB.TIMEOUT):
             continue
         finally:
             response.close()
+
+    # A web server that answered but never named itself (no Server header, no
+    # usable title) is the signature of a bare embedded stack. Record the hint
+    # so the summary can flag an otherwise-anonymous appliance.
+    if saw_response and not saw_server:
+        record(ip_address, APPLIANCE, "embedded http server", _SOURCE)
     return None

@@ -16,6 +16,7 @@ from yaspin import yaspin
 
 from lantern.constants import ENCODING, MDNS, PASSIVE, SSDP
 from lantern.logger import attach_spinner, detach_spinner, logger
+from lantern.metadata import DHCP_FINGERPRINT, FQDN, VENDOR_CLASS, record
 from lantern.sanitize import sanitize_name
 from lantern.scope import is_in_scope
 
@@ -103,6 +104,81 @@ def parse_arp(pkt):
     return arp.psrc, arp.hwsrc
 
 
+# Trivial option-name -> option-number map, for parameter-request lists that
+# arrive pre-decoded into DHCP option names instead of raw numbers.
+_DHCP_OPTION_IDS = {
+    names[0]: names[1]
+    for names in (
+        PASSIVE.DHCP_HOSTNAME_OPTIONS,
+        PASSIVE.DHCP_VENDOR_CLASS_OPTIONS,
+        PASSIVE.DHCP_PARAM_REQUEST_OPTIONS,
+        PASSIVE.DHCP_CLIENT_FQDN_OPTIONS,
+        PASSIVE.DHCP_CLIENT_ID_OPTIONS,
+    )
+}
+
+
+def _dhcp_option_value(options, names):
+    """First value among ``options`` whose id/name matches ``names``."""
+    for option in options:
+        if not isinstance(option, (tuple, list)) or len(option) < 2:
+            continue
+        if option[0] in names:
+            return option[1]
+    return None
+
+
+def _dhcp_text(value):
+    """Decode a DHCP byte-string option; other values pass through untouched."""
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode(ENCODING, errors="ignore")
+    return value
+
+
+def _dhcp_fingerprint(value):
+    """Render a parameter-request list as "1,3,6" style option numbers."""
+    if not isinstance(value, (bytes, bytearray, list, tuple)):
+        return None
+
+    numbers = []
+    for item in value:
+        if isinstance(item, int) and not isinstance(item, bool):
+            numbers.append(str(item))
+        elif item in _DHCP_OPTION_IDS:
+            numbers.append(str(_DHCP_OPTION_IDS[item]))
+        else:
+            numbers.append(str(item))
+    return ",".join(numbers) or None
+
+
+def _record_dhcp_metadata(ip_address, options):
+    """Store the metadata options of a DHCP packet for ``ip_address``.
+
+    A pure side effect for the details column: it never changes name
+    resolution, never raises, and malformed or absent options simply record
+    nothing.
+    """
+    try:
+        vendor_class = _dhcp_option_value(options, PASSIVE.DHCP_VENDOR_CLASS_OPTIONS)
+        if vendor_class:
+            record(ip_address, VENDOR_CLASS, _dhcp_text(vendor_class), "DHCP")
+
+        fqdn = _dhcp_option_value(options, PASSIVE.DHCP_CLIENT_FQDN_OPTIONS)
+        if fqdn:
+            record(ip_address, FQDN, _dhcp_text(fqdn), "DHCP")
+
+        client_id = _dhcp_option_value(options, PASSIVE.DHCP_CLIENT_ID_OPTIONS)
+        if client_id:
+            record(ip_address, "client_id", _dhcp_text(client_id), "DHCP")
+
+        requested = _dhcp_option_value(options, PASSIVE.DHCP_PARAM_REQUEST_OPTIONS)
+        fingerprint = _dhcp_fingerprint(requested)
+        if fingerprint:
+            record(ip_address, DHCP_FINGERPRINT, fingerprint, "DHCP")
+    except Exception as error:
+        logger.trace("DHCP metadata ignored for {}: {}", ip_address, error)
+
+
 def parse_dhcp(pkt):
     """Pull the hostname option (12) and leased IP out of DHCP traffic."""
     if not (pkt.haslayer(BOOTP) and pkt.haslayer(DHCP)):
@@ -113,8 +189,11 @@ def parse_dhcp(pkt):
     if not ip or ip == "0.0.0.0":
         return None
 
+    options = pkt[DHCP].options
+    _record_dhcp_metadata(ip, options)
+
     name = None
-    for option in pkt[DHCP].options:
+    for option in options:
         if not isinstance(option, tuple) or len(option) < 2:
             continue
         if option[0] in PASSIVE.DHCP_HOSTNAME_OPTIONS:

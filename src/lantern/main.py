@@ -1,3 +1,5 @@
+import argparse
+import json
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -5,8 +7,9 @@ from concurrent.futures import ThreadPoolExecutor
 from scapy.all import ARP, Ether, srp
 from tabulate import tabulate
 
-from lantern.constants import NAME, NETWORK, TABLE
+from lantern.constants import METADATA, NAME, NETWORK, TABLE
 from lantern.logger import logger
+from lantern.metadata import get_metadata, record, reset_metadata
 from lantern.passive import (
     finish_passive_scan,
     get_passive_macs,
@@ -16,6 +19,7 @@ from lantern.passive import (
 from lantern.resolvers import (
     finish_prefetch_broadcast,
     get_vendor,
+    is_locally_administered,
     reset_mdns_service_cache,
     reset_name_state,
     reset_ssdp_cache,
@@ -23,7 +27,9 @@ from lantern.resolvers import (
     shutdown_name_state,
     start_prefetch_broadcast,
 )
+from lantern.resolvers.ports import record_open_ports
 from lantern.scope import clear_scan_network, is_in_scope, set_scan_network
+from lantern.summary import summarize
 
 
 def _resolve_device(entry):
@@ -33,12 +39,39 @@ def _resolve_device(entry):
     with logger.contextualize(device=device):
         name = resolve_name(ip, device=device)
         vendor = get_vendor(mac)
+        # A locally administered MAC means a privacy-randomized endpoint or a
+        # VM. `get_vendor` cannot say where it is, so record it here.
+        if is_locally_administered(mac):
+            record(ip, "randomized_mac", "true", source="vendor")
+        # A per-device service inventory, independent of the name chain.
+        record_open_ports(ip)
         logger.info("Identified {!r} (vendor: {})", name, vendor)
     return {"ip": ip, "mac": mac, "name": name, "vendor": vendor}
 
 
-def scan_network(ip_range: str):
-    # Use scapy to perform a network scan on the given IP range
+def _format_metadata(metadata):
+    """Render per-device facts as one compact, ordered details string."""
+    if not metadata:
+        return ""
+
+    order = METADATA.DISPLAY_ORDER
+    keys = sorted(
+        metadata,
+        key=lambda key: (order.index(key) if key in order else len(order), key),
+    )
+    text = METADATA.SEPARATOR.join(f"{key}={metadata[key]}" for key in keys)
+    if len(text) > METADATA.MAX_DISPLAY:
+        text = text[: METADATA.MAX_DISPLAY - 3].rstrip() + "..."
+    return text
+
+
+def run_scan(ip_range: str):
+    """Run one scan and return its structured, JSON-serializable result.
+
+    This is the shared core behind the CLI and the MCP server. It performs the
+    scan and returns ``{"range", "elapsed_seconds", "device_count", "devices",
+    "summary"}`` without printing anything, so each caller owns presentation.
+    """
     logger.info("Starting ARP scan of {}", ip_range)
     started = time.monotonic()
 
@@ -48,6 +81,7 @@ def scan_network(ip_range: str):
     reset_mdns_service_cache()
     reset_ssdp_cache()
     reset_name_state()
+    reset_metadata()
 
     try:
         # Listen for self-announcements in parallel with the active ARP probe.
@@ -77,9 +111,15 @@ def scan_network(ip_range: str):
             finish_prefetch_broadcast(broadcast)
 
         found = {received.psrc: received.hwsrc for _sent, received in hosts}
+        # Keep every ip/mac pairing, not just the first per ip: duplicate IPs
+        # with different MACs (and vice versa) are the anomaly summary's input.
+        observations = [
+            (received.psrc, received.hwsrc, "arp") for _sent, received in hosts
+        ]
         for ip, mac in get_passive_macs().items():
             if is_in_scope(ip):
                 found.setdefault(ip, mac)
+                observations.append((ip, mac, "passive"))
 
         # The passive listener's own SSDP descriptions can only be fetched once
         # it has been joined; the broadcast sources already ran above.
@@ -89,25 +129,69 @@ def scan_network(ip_range: str):
             devices = list(pool.map(_resolve_device, found.items()))
 
         # Let any lookups still in flight finish before reporting, so nothing
-        # continues after the table is printed.
+        # continues after the table is printed. Metadata is read only after
+        # that drain so facts a slow source records still make the table.
         shutdown_name_state()
+
+        for device in devices:
+            facts = get_metadata(device["ip"])
+            device["metadata"] = facts
+            device["details"] = _format_metadata(facts)
     finally:
         clear_scan_network()
 
     elapsed = time.monotonic() - started
-    if devices:
-        print(
-            tabulate(
-                [device.values() for device in devices],
-                headers=TABLE.HEADERS,
-                tablefmt=TABLE.FORMAT,
-            )
-        )
-    else:
+    if not devices:
         logger.warning("No devices found.")
     logger.info("Scan complete: {} device(s) in {:.2f}s", len(devices), elapsed)
 
-    return devices
+    return {
+        "range": ip_range,
+        "elapsed_seconds": round(elapsed, 3),
+        "device_count": len(devices),
+        "devices": devices,
+        "summary": summarize(devices, observations),
+    }
+
+
+def format_table(devices):
+    """Render the device list as the stdout grid table, or "" when empty."""
+    if not devices:
+        return ""
+    return tabulate(
+        [
+            (
+                device["ip"],
+                device["mac"],
+                device["name"],
+                device["vendor"],
+                device["details"],
+            )
+            for device in devices
+        ],
+        headers=TABLE.HEADERS,
+        tablefmt=TABLE.FORMAT,
+    )
+
+
+def log_summary(summary):
+    """Log a ``summarize`` result's ready-to-log lines to stderr."""
+    for line in summary.get("lines", ()):
+        logger.info(line)
+
+
+def scan_network(ip_range: str):
+    """Scan, print the table and log the summary; return the device list.
+
+    The command-line entry point: ``run_scan`` does the work, and this wrapper
+    adds the human-facing table on stdout and summary lines on stderr.
+    """
+    result = run_scan(ip_range)
+    table = format_table(result["devices"])
+    if table:
+        print(table)
+    log_summary(result["summary"])
+    return result["devices"]
 
 
 def get_local_ip():
@@ -132,7 +216,36 @@ def get_local_ip():
     return local_ip
 
 
-if __name__ == "__main__":
-    target_ip_range = f"{get_local_ip()}/{NETWORK.DEFAULT_PREFIX_LENGTH}"
+def default_scan_range():
+    """Return the /24 around this machine's local IP."""
+    return f"{get_local_ip()}/{NETWORK.DEFAULT_PREFIX_LENGTH}"
 
-    scan_network(target_ip_range)
+
+def main(argv=None):
+    """Command-line entry point: scan and print the table (or JSON)."""
+    parser = argparse.ArgumentParser(
+        prog="lantern",
+        description="Identify and name every device on the local network.",
+    )
+    parser.add_argument(
+        "--range",
+        dest="ip_range",
+        default=None,
+        help="CIDR to scan (default: the /24 around the local IP)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print the full scan result as JSON instead of a table",
+    )
+    args = parser.parse_args(argv)
+
+    ip_range = args.ip_range or default_scan_range()
+    if args.json:
+        print(json.dumps(run_scan(ip_range)))
+    else:
+        scan_network(ip_range)
+
+
+if __name__ == "__main__":
+    main()

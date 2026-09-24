@@ -10,15 +10,38 @@ from scapy.all import IP, UDP, AsyncSniffer, Ether, Raw, sendp
 
 from lantern.constants import ENCODING, SSDP, WEB
 from lantern.logger import logger
+from lantern.metadata import (
+    DEVICE_TYPE,
+    MANUFACTURER,
+    MODEL,
+    SERIAL,
+    SERVER,
+    UUID,
+    record,
+)
 from lantern.sanitize import sanitize_name
 from lantern.scope import is_in_scope, require_read_only
 
 # Scan-scoped caches. ``_locations`` maps a responder IP to its description
-# URL and ``_names`` to the name parsed from it. ``_discovery_done`` records
-# whether a single broadcast M-SEARCH already covered the whole subnet.
+# URL and ``_names`` to the name parsed from it. ``_description_metadata``
+# keeps the extra description fields parsed alongside each name.
+# ``_discovery_done`` records whether a single broadcast M-SEARCH already
+# covered the whole subnet.
 _locations = {}
 _names = {}
+_description_metadata = {}
 _discovery_done = False
+
+# Description elements -> metadata fact keys. ``modelnumber`` has no canonical
+# key, so it gets a short snake_case key of its own.
+_DESCRIPTION_KEYS = {
+    "devicetype": DEVICE_TYPE,
+    "udn": UUID,
+    "serialnumber": SERIAL,
+    "modelname": MODEL,
+    "manufacturer": MANUFACTURER,
+    "modelnumber": "model_number",
+}
 
 
 class _NoRedirects(urllib.request.HTTPRedirectHandler):
@@ -74,22 +97,83 @@ def reset_ssdp_cache():
     global _discovery_done
     _locations.clear()
     _names.clear()
+    _description_metadata.clear()
     _discovery_done = False
+
+
+def parse_ssdp_headers(payload):
+    """Return an SSDP M-SEARCH response's headers as ``{name: value}``.
+
+    Names are lowercased without the trailing colon, so ``SERVER:`` becomes
+    ``"server"``. Anything that is not a ``Name: value`` line (status line,
+    binary noise, blanks) is ignored; a missing or unparseable payload yields
+    an empty mapping.
+    """
+    try:
+        text = payload.decode(ENCODING, errors="ignore")
+    except Exception:
+        return {}
+
+    headers = {}
+    for line in text.splitlines():
+        name, separator, value = line.partition(":")
+        if not separator:
+            continue
+        name = name.strip().lower()
+        if name:
+            headers.setdefault(name, value.strip())
+    return headers
 
 
 def parse_ssdp_location(payload):
     """Pull the LOCATION header URL out of an SSDP M-SEARCH response."""
+    location = parse_ssdp_headers(payload).get(SSDP.LOCATION_HEADER.rstrip(":"))
+    if location is None:
+        logger.trace("No LOCATION header in SSDP response")
+    return location
+
+
+def _device_type_label(value):
+    """Reduce a UPnP device/service type to its bare type name.
+
+    ``urn:schemas-upnp-org:device:MediaRenderer:1`` becomes ``MediaRenderer``:
+    the trailing numeric UPnP version segment is dropped, then the final
+    ``:``-separated segment is kept.
+    """
+    segments = [segment for segment in value.split(":") if segment]
+    if len(segments) > 1 and segments[-1].isdigit():
+        segments = segments[:-1]
+    return segments[-1] if segments else ""
+
+
+def _usn_uuid(value):
+    """Pull the bare UUID out of a USN (``uuid:x::urn:...`` -> ``x``)."""
+    base = value.split("::", 1)[0].strip()
+    if base.lower().startswith("uuid:"):
+        base = base[len("uuid:") :].strip()
+    return base
+
+
+def _record_response_metadata(ip_address, headers):
+    """Record header facts from an in-scope M-SEARCH response."""
+    if not is_in_scope(ip_address):
+        return
     try:
-        text = payload.decode(ENCODING, errors="ignore")
-    except Exception:
-        return None
-
-    for line in text.splitlines():
-        if line.lower().startswith(SSDP.LOCATION_HEADER):
-            return line.split(":", 1)[1].strip()
-
-    logger.trace("No LOCATION header in SSDP response")
-    return None
+        record(ip_address, SERVER, headers.get(SSDP.SERVER_HEADER.rstrip(":")), "SSDP")
+        record(
+            ip_address,
+            DEVICE_TYPE,
+            _device_type_label(headers.get(SSDP.ST_HEADER.rstrip(":")) or ""),
+            "SSDP",
+        )
+        record(
+            ip_address,
+            UUID,
+            _usn_uuid(headers.get(SSDP.USN_HEADER.rstrip(":")) or ""),
+            "SSDP",
+        )
+    except Exception as error:
+        logger.trace("Could not record SSDP header metadata: {}", error)
 
 
 def parse_ssdp_description(body):
@@ -118,6 +202,50 @@ def parse_ssdp_description(body):
     return None
 
 
+def parse_ssdp_metadata(body):
+    """Extract metadata fields (device type, UUID, serial, ...) from a description.
+
+    Like :func:`parse_ssdp_description`, this parses with defusedxml so a
+    hostile document cannot exhaust memory via entity expansion, and every
+    value is sanitized. Malformed or absent fields simply leave the result
+    empty; a description with nothing useful yields ``{}``.
+    """
+    try:
+        root = defusedxml.ElementTree.fromstring(body)
+    except (defusedxml.ElementTree.ParseError, DefusedXmlException) as error:
+        logger.trace("Malformed SSDP description: {}", error)
+        return {}
+
+    fields = {}
+    for element in root.iter():
+        tag = element.tag.rsplit("}", 1)[-1].lower()
+        if tag in SSDP.METADATA_FIELDS and element.text and tag not in fields:
+            text = sanitize_name(element.text)
+            if text:
+                fields[tag] = text
+    return fields
+
+
+def record_ssdp_description_metadata():
+    """Record the cached description metadata for every discovered device."""
+    try:
+        for ip_address, location in list(_locations.items()):
+            fields = _description_metadata.get(location)
+            if not fields or not is_in_scope(ip_address):
+                continue
+            for tag, value in fields.items():
+                key = _DESCRIPTION_KEYS.get(tag)
+                if not key:
+                    continue
+                if tag == "devicetype":
+                    value = _device_type_label(value)
+                elif tag == "udn":
+                    value = _usn_uuid(value)
+                record(ip_address, key, value, "SSDP")
+    except Exception as error:
+        logger.trace("Could not record SSDP description metadata: {}", error)
+
+
 def get_ssdp_description(location, timeout=SSDP.HTTP_TIMEOUT):
     """Download a UPnP device description and pull a friendly name from it."""
     location = _allowed_location(location)
@@ -143,7 +271,12 @@ def get_ssdp_description(location, timeout=SSDP.HTTP_TIMEOUT):
     finally:
         response.close()
 
-    return parse_ssdp_description(body)
+    name = parse_ssdp_description(body)
+    try:
+        _description_metadata[location] = parse_ssdp_metadata(body)
+    except Exception as error:
+        logger.trace("Could not parse SSDP metadata from {}: {}", location, error)
+    return name
 
 
 def _ssdp_search(timeout):
@@ -178,9 +311,11 @@ def _ssdp_search(timeout):
             and pkt.haslayer(Raw)
             and pkt[UDP].sport == SSDP.PORT
         ):
-            location = parse_ssdp_location(pkt[Raw].load)
+            headers = parse_ssdp_headers(pkt[Raw].load)
+            location = headers.get(SSDP.LOCATION_HEADER.rstrip(":"))
             if location:
                 found.append((pkt[IP].src, location))
+                _record_response_metadata(pkt[IP].src, headers)
 
     sniffer = AsyncSniffer(
         filter=f"udp port {SSDP.PORT}",
@@ -233,6 +368,7 @@ def resolve_ssdp_names():
             if name:
                 _names[ip_address] = name
 
+    record_ssdp_description_metadata()
     return dict(_names)
 
 
@@ -257,7 +393,10 @@ def get_ssdp_name(ip_address, timeout=SSDP.TIMEOUT):
     for found_ip, found_location in _ssdp_search(timeout):
         if found_ip != ip_address:
             continue
+        if is_in_scope(found_ip):
+            _locations.setdefault(found_ip, found_location)
         name = get_ssdp_description(found_location)
+        record_ssdp_description_metadata()
         if name:
             logger.debug("SSDP resolved {} as {!r}", ip_address, name)
             _names[ip_address] = name
