@@ -168,6 +168,9 @@ def test_passive_scan_stops_early_once_quiet(monkeypatch):
         def stop(self):
             events.append("spinner-stop")
 
+        def write(self, text):
+            pass
+
     class FakeSniffer:
         running = False
 
@@ -236,12 +239,60 @@ def test_passive_scan_stops_spinner_without_sniffer():
         def stop(self):
             events.append("stop")
 
+        def write(self, text):
+            pass
+
     passive._spinner = FakeSpinner()
     passive._spinner.start()
 
     passive.finish_passive_scan(None)
 
     assert events == ["start", "stop"]
+
+
+def test_passive_scan_binds_and_releases_spinner(monkeypatch):
+    passive.reset_passive_cache()
+    bound = []
+
+    class FakeSpinner:
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def write(self, text):
+            pass
+
+    class FakeSniffer:
+        running = False
+
+        def start(self):
+            self.running = True
+
+        def join(self, timeout=None):
+            pass
+
+        def stop(self):
+            self.running = False
+
+    spinner = FakeSpinner()
+    monkeypatch.setattr(passive, "yaspin", lambda **kwargs: spinner)
+    monkeypatch.setattr(passive, "AsyncSniffer", lambda **kwargs: FakeSniffer())
+    monkeypatch.setattr(
+        passive, "attach_spinner", lambda s: bound.append(("attach", s))
+    )
+    monkeypatch.setattr(
+        passive, "detach_spinner", lambda s=None: bound.append(("detach", s))
+    )
+    monkeypatch.setattr(passive.PASSIVE, "MIN_WINDOW", 0, raising=False)
+    monkeypatch.setattr(passive.PASSIVE, "QUIET_PERIOD", 0, raising=False)
+    monkeypatch.setattr(passive.PASSIVE, "POLL_INTERVAL", 0, raising=False)
+
+    sniffer = passive.start_passive_scan(timeout=1)
+    passive.finish_passive_scan(sniffer)
+
+    assert bound == [("attach", spinner), ("detach", spinner)]
 
 
 def test_passive_runs_first_in_name_chain():

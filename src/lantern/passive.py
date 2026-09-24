@@ -7,6 +7,7 @@ ARP scan and feeds the normal name-resolution chain.
 """
 
 import concurrent.futures
+import sys
 import threading
 import time
 
@@ -14,7 +15,7 @@ from scapy.all import ARP, BOOTP, DHCP, DNS, IP, UDP, AsyncSniffer, Raw
 from yaspin import yaspin
 
 from lantern.constants import ENCODING, MDNS, PASSIVE, SSDP
-from lantern.logger import logger
+from lantern.logger import attach_spinner, detach_spinner, logger
 from lantern.sanitize import sanitize_name
 from lantern.scope import is_in_scope
 
@@ -34,8 +35,14 @@ _listen_started = 0.0
 def _stop_spinner():
     global _spinner
     if _spinner is not None:
-        _spinner.stop()
-        _spinner = None
+        # Clear the global first so a re-entrant stop cannot double-release,
+        # then stop while still attached: any log racing the teardown is drawn
+        # above the spinner rather than interleaved with its final frame.
+        spinner, _spinner = _spinner, None
+        try:
+            spinner.stop()
+        finally:
+            detach_spinner(spinner)
 
 
 def reset_passive_cache():
@@ -308,8 +315,14 @@ def start_passive_scan(timeout=PASSIVE.TIMEOUT):
         timeout=timeout,
     )
     logger.info("Listening passively for up to {}s", timeout)
-    _spinner = yaspin(text=f"Listening passively for up to {timeout}s", color="cyan")
+    _spinner = yaspin(
+        text=f"Listening passively for up to {timeout}s",
+        color="cyan",
+        stream=sys.stderr,
+    )
     _spinner.start()
+    # Logs from every thread are drawn above the spinner instead of through it.
+    attach_spinner(_spinner)
     _sniffer.start()
     return _sniffer
 
@@ -339,8 +352,8 @@ def _drain_until_quiet(sniffer):
         if not _listener_alive(sniffer):
             break
         if _quiet_reached():
-            logger.debug("Passive listener stopping early: wire has gone quiet")
             sniffer.stop()
+            logger.debug("Passive listener stopping early: wire has gone quiet")
             break
 
 

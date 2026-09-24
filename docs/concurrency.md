@@ -25,6 +25,7 @@ wins.
   - [Futures and executors](#futures-and-executors)
   - [Context variables and logging](#context-variables-and-logging)
 - [Sniffers and scapy threads](#sniffers-and-scapy-threads)
+- [Terminal output and the spinner](#terminal-output-and-the-spinner)
 - [Constants reference](#constants-reference)
 - [Known limitations](#known-limitations)
 
@@ -489,6 +490,35 @@ elicits).
 `scapy`'s `srp` (the ARP scan) and `sr1` (router DNS, NetBIOS) also use their
 own sockets and, internally, a sender thread. They are called from resolver
 workers and, as noted, are not serialized.
+
+## Terminal output and the spinner
+
+The passive listener shows a `yaspin` spinner while it waits, and the whole scan
+logs through `loguru`. The two write to the same terminal from different
+threads, which mangles output by default: yaspin redraws its frame in place with
+a carriage return and no newline, so a record written straight to `stderr`
+shares the frame's line, and the next frame redraws over it. The prefetch
+threads exposed this, because they log *during* the listening window.
+
+`logger.py` owns a `_SpinnerSink` that the passive listener registers its
+spinner with (`attach_spinner`) for the duration of the animation. While a
+spinner is attached, every record is routed through `Yaspin.write`, which clears
+the frame, prints the record on its own line, and lets the next frame redraw
+below it. With no spinner attached the sink writes to `stderr` exactly as
+before.
+
+Three details make this safe:
+
+- The spinner and the logger share one stream (`stderr`; the results table
+  stays on `stdout`), so clearing the frame actually clears the right line.
+- `Yaspin.write` and the spinner thread both take yaspin's own stream lock,
+  and loguru serialises calls into the sink, so a record never splits a frame.
+- The listener stops the spinner *before* detaching it, so a log racing the
+  teardown is still drawn above the frame rather than interleaved with it.
+
+This is coordination, not a lock in this codebase's sense: the sink holds no
+shared mutable state beyond the current spinner reference, and no resolver
+touches it.
 
 ## Constants reference
 
